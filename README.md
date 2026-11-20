@@ -29,6 +29,9 @@ The UI uses GCJ-02 coordinates throughout.
   (`traverse: "fence"`) and draws it at the bottom of the map with a pale
   green fill and a green dashed boundary. The initial view fits the roads and
   the fence together.
+- **Map interaction**: click inside the fence to pick points; left-drag outside
+  the fence to pan the map. The wider right sidebar scrolls vertically when
+  the scoring-run options exceed the window height.
 - **Pace playback**: adjust the pace with a slider from 0'05'' to 10'00'' per
   kilometer (default 5'00''). Press Play to move a directional arrow at the
   real pace; drag the slider to its minimum for a quick preview. The large
@@ -48,6 +51,13 @@ The UI uses GCJ-02 coordinates throughout.
     the running track and continues counterclockwise until the daily cap is
     reached (8 km for male, 5 km for female, male by default). It can be
     combined freely with reduce backtracking.
+  - **Stroll** (playback only): every road and ring is treated as a centerline
+    with a uniform 10 m width. The moving arrow keeps to the right side, may
+    wander inside that lane, and returns to the centerline near sharp turns and
+    checkpoints. The location interval (1-10 s) and maximum heading noise
+    (0 to +/-5 degrees) are adjustable. The full wander path is generated
+    before playback starts, so the arrow never pauses to search for the next
+    target.
 
 ## Requirements
 
@@ -111,10 +121,11 @@ campus-nav/
 │       │   ├── models.py        # Edge / Area / RouteResult / PointRun
 │       │   ├── dijkstra.py      # Dijkstra with forbidden-direction support
 │       │   ├── campus_map.py    # graph construction, routing, run planning
-│       │   └── immersive.py     # immersive state machine (one-by-one reveal)
+│       │   ├── immersive.py     # immersive state machine (one-by-one reveal)
+│       │   └── stroll.py        # playback-only wander path (right side, 10 m lane)
 │       └── ui/
 │           ├── app.py           # main window, interaction, sidebar, playback
-│           ├── widgets.py       # pace slider (rheostat style)
+│           ├── widgets.py       # integer value slider (rheostat style)
 │           ├── drawing.py       # canvas viewport and drawing
 │           ├── dpi.py           # Windows high-DPI support
 │           └── theme.py         # colors and fonts
@@ -126,6 +137,7 @@ campus-nav/
     ├── test_fence.py
     ├── test_routing.py
     ├── test_immersive.py
+    ├── test_stroll.py
     ├── test_formatting.py
     └── test_cli.py
 ```
@@ -170,6 +182,11 @@ uv run python scripts/build_gcj02_data.py
    point: route to the track, then continue along the counterclockwise
    boundary for the remaining distance (multiple laps are allowed) and
    truncate the final path by length.
+7. Stroll playback samples the planned route as a centerline. Each location
+   update advances by `speed x interval` meters, applies a bounded random
+   heading, clamps the lateral offset to the right half of the 10 m road, and
+   pulls the path back to the centerline at corners and checkpoints. The
+   sequence is precomputed; the animation only interpolates it.
 
 ## Development and testing
 
@@ -181,4 +198,5 @@ uv run campus-nav --check
 
 `test_self_check_passes` in `uv run pytest` runs the same 49 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
-alignment, geometry helpers, routing, and scoring-run behavior.
+alignment, stroll-path bounds, geometry helpers, routing, and scoring-run
+behavior.

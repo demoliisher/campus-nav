@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import math
+import random
 import time
 import tkinter as tk
 from tkinter import ttk
 
 from ..formatting import fmt_len, fmt_lonlat, fmt_walked
 from ..geo.fence import Fence
+from ..geo.polygons import point_in_polygon, point_on_boundary
 from ..pacing import (
     PACE_DEFAULT_SEC,
     PACE_MAX_SEC,
@@ -19,6 +21,7 @@ from ..pacing import (
 from ..routing.campus_map import CampusMap
 from ..routing.immersive import ImmersiveSession
 from ..routing.models import PointRun, RouteResult
+from ..routing.stroll import build_stroll_path
 from .drawing import MapDrawingMixin
 from .theme import (
     C_A,
@@ -36,7 +39,7 @@ from .theme import (
     FONT_MONO,
     FONT_UI,
 )
-from .widgets import PaceSlider
+from .widgets import ValueSlider
 
 
 class CampusNavApp(MapDrawingMixin):
@@ -47,6 +50,10 @@ class CampusNavApp(MapDrawingMixin):
         self.root = root
         self.cmap = cmap
         self.fences = list(fences or [])
+        self._fence_rings_xy = [
+            [self.cmap.proj.xy(lon, lat) for lon, lat in ring]
+            for fence in self.fences for ring in fence.rings
+        ]
         self.points: list[tuple[float, float]] = []      # [(lon, lat)], at most 2
         self.result: RouteResult | None = None
         self.error: str | None = None
@@ -58,12 +65,19 @@ class CampusNavApp(MapDrawingMixin):
         self.reduce_backtrack = tk.BooleanVar(value=False)
         self.run_limit = tk.BooleanVar(value=False)
         self.gender = "male"                             # male / female
+        self.stroll = tk.BooleanVar(value=False)
+        self.gps_period_sec = 1
+        self.heading_max_deg = 3
+        self._stroll_seed = 0
         self.scale = 0.0
         self.ox = 0.0
         self.oy = 0.0
         self._fit_scale = 0.0
         self._view_locked = False
         self._pan_anchor: tuple[int, int] | None = None
+        self._left_press: tuple[int, int] | None = None
+        self._left_moved = False
+        self._left_pan_anchor: tuple[int, int] | None = None
         self._last_click = 0.0
         self._closing = False
 
@@ -137,9 +151,27 @@ class CampusNavApp(MapDrawingMixin):
         body = tk.Frame(self.root, bg=C_BG)
         body.pack(fill="both", expand=True)
 
-        side = tk.Frame(body, bg=C_SIDEBAR, width=P(286))
-        side.pack(side="right", fill="y")
-        side.pack_propagate(False)
+        side_scroll = ttk.Scrollbar(body, orient="vertical")
+        side_scroll.pack(side="right", fill="y")
+        side_canvas = tk.Canvas(
+            body, bg=C_SIDEBAR, width=P(340), highlightthickness=0,
+            yscrollcommand=side_scroll.set,
+        )
+        side_canvas.pack(side="right", fill="y")
+        side_scroll.configure(command=side_canvas.yview)
+        side = tk.Frame(side_canvas, bg=C_SIDEBAR)
+        side_window = side_canvas.create_window((0, 0), window=side, anchor="nw")
+        side_canvas.bind(
+            "<Configure>",
+            lambda e: side_canvas.itemconfigure(side_window, width=e.width),
+        )
+        side.bind(
+            "<Configure>",
+            lambda _e: side_canvas.configure(scrollregion=side_canvas.bbox("all")),
+        )
+        self.side_canvas = side_canvas
+        self.side_scroll = side_scroll
+        self.side_frame = side
         tk.Frame(body, bg=C_LINE, width=P(1)).pack(side="right", fill="y")
 
         self.canvas = tk.Canvas(
@@ -166,7 +198,7 @@ class CampusNavApp(MapDrawingMixin):
         section("Status", 16)
         self.status_lbl = tk.Label(
             side, text="", font=(FONT_UI, 9), fg=C_STATUS_FG, bg=C_STATUS_BG,
-            justify="left", anchor="nw", wraplength=P(232),
+            justify="left", anchor="nw", wraplength=P(286),
             padx=P(10), pady=P(9),
         )
         self.status_lbl.pack(fill="x", padx=P(18))
@@ -217,8 +249,8 @@ class CampusNavApp(MapDrawingMixin):
             anchor="e", width=7,
         )
         self.pace_value_lbl.pack(side="right", padx=(P(4), P(6)))
-        self.pace_slider = PaceSlider(
-            pace_row, min_sec=PACE_MIN_SEC, max_sec=PACE_MAX_SEC,
+        self.pace_slider = ValueSlider(
+            pace_row, min_value=PACE_MIN_SEC, max_value=PACE_MAX_SEC,
             value=self.pace_seconds, on_change=self._on_pace_slide,
             ui_scale=self.ui,
         )
@@ -275,7 +307,7 @@ class CampusNavApp(MapDrawingMixin):
         self.run_desc_lbl = tk.Label(
             self.run_box, text="Five ordered waypoints appear on roads; numbers show the order.",
             font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR,
-            justify="left", anchor="w", wraplength=P(250),
+            justify="left", anchor="w", wraplength=P(304),
         )
         self.run_desc_lbl.pack(fill="x", padx=P(18), pady=(P(2), P(2)))
 
@@ -333,6 +365,59 @@ class CampusNavApp(MapDrawingMixin):
         self.cap_lbl.pack(side="left", padx=(P(6), 0))
         self._update_gender_buttons()
 
+        stroll_row = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        stroll_row.pack(fill="x", padx=P(18), pady=(P(2), P(1)))
+        tk.Checkbutton(
+            stroll_row, text="Stroll", variable=self.stroll,
+            command=self._on_stroll_toggle,
+            bg=C_SIDEBAR, fg=C_TEXT, activebackground=C_SIDEBAR,
+            selectcolor=C_SIDEBAR, font=(FONT_UI, 9), anchor="w",
+            bd=0, highlightthickness=0, padx=0,
+        ).pack(side="left")
+        tk.Label(
+            stroll_row, text="Playback only · stay right within 10 m",
+            font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR,
+        ).pack(side="left", padx=(P(5), 0))
+        self.stroll_row = stroll_row
+
+        self.stroll_box = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        period_head = tk.Frame(self.stroll_box, bg=C_SIDEBAR)
+        period_head.pack(fill="x", padx=P(18))
+        tk.Label(
+            period_head, text="Location interval", font=(FONT_UI, 8),
+            fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
+        ).pack(side="left")
+        self.period_val_lbl = tk.Label(
+            period_head, text=f"{self.gps_period_sec} s",
+            font=(FONT_MONO, 8), fg=C_TEXT, bg=C_SIDEBAR, anchor="e",
+        )
+        self.period_val_lbl.pack(side="right")
+        self.period_slider = ValueSlider(
+            self.stroll_box, min_value=1, max_value=10,
+            value=self.gps_period_sec, on_change=self._on_period_slide,
+            ui_scale=self.ui,
+        )
+        self.period_slider.pack(fill="x", padx=P(18), pady=(0, P(2)))
+
+        angle_head = tk.Frame(self.stroll_box, bg=C_SIDEBAR)
+        angle_head.pack(fill="x", padx=P(18))
+        tk.Label(
+            angle_head, text="Heading noise", font=(FONT_UI, 8),
+            fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
+        ).pack(side="left")
+        self.angle_val_lbl = tk.Label(
+            angle_head, text=f"±{self.heading_max_deg}°",
+            font=(FONT_MONO, 8), fg=C_TEXT, bg=C_SIDEBAR, anchor="e",
+        )
+        self.angle_val_lbl.pack(side="right")
+        self.angle_slider = ValueSlider(
+            self.stroll_box, min_value=0, max_value=5,
+            value=self.heading_max_deg, on_change=self._on_angle_slide,
+            ui_scale=self.ui,
+        )
+        self.angle_slider.pack(fill="x", padx=P(18), pady=(0, P(2)))
+        self.stroll_box.pack_forget()
+
         hr()
 
         # Distance
@@ -374,15 +459,17 @@ class CampusNavApp(MapDrawingMixin):
         # Bottom hint
         self.hint_lbl = tk.Label(
             side,
-            text="Left-click to pick · Wheel to zoom · Middle/right drag · Ctrl+Z undo",
+            text="Left-click to pick · Drag outside fence to pan · Wheel to zoom · Ctrl+Z undo",
             font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR, justify="left",
-            wraplength=P(250),
+            wraplength=P(304),
         )
         self.hint_lbl.pack(side="bottom", anchor="w", padx=P(18), pady=P(12))
 
     # ---- Events ----------------------------------------------------------
     def _bind_events(self) -> None:
-        self.canvas.bind("<Button-1>", self._on_left_click)
+        self.canvas.bind("<Button-1>", self._on_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.2))
         self.canvas.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.2))
@@ -393,6 +480,9 @@ class CampusNavApp(MapDrawingMixin):
         self.canvas.bind("<Configure>", self._on_configure)
         self.root.bind("<Control-z>", self._on_undo_key)
         self.root.bind("<Control-Z>", self._on_undo_key)
+        self.root.bind_all("<MouseWheel>", self._on_sidebar_wheel, add="+")
+        self.root.bind_all("<Button-4>", self._on_sidebar_wheel, add="+")
+        self.root.bind_all("<Button-5>", self._on_sidebar_wheel, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_configure(self, event) -> None:
@@ -407,10 +497,77 @@ class CampusNavApp(MapDrawingMixin):
         self.undo()
         return "break"
 
-    def _on_left_click(self, event) -> None:
+    def _on_sidebar_wheel(self, event):
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        w = widget
+        while w is not None:
+            if w in (self.side_canvas, self.side_scroll, self.side_frame):
+                break
+            w = w.master
+        else:
+            return None
+        if widget is None:
+            return None
+        num = getattr(event, "num", None)
+        if num == 4:
+            step = -1
+        elif num == 5:
+            step = 1
+        else:
+            step = -1 if getattr(event, "delta", 0) > 0 else 1
+        self.side_canvas.yview_scroll(step, "units")
+        return "break"
+
+    def _inside_fence(self, px: float, py: float) -> bool:
+        if not self._fence_rings_xy:
+            return False
+        x, y = self._world_at(px, py)
+        for ring in self._fence_rings_xy:
+            if point_in_polygon(x, y, ring) or point_on_boundary(x, y, ring):
+                return True
+        return False
+
+    def _on_left_press(self, event) -> None:
+        self._left_press = (event.x, event.y)
+        self._left_moved = False
+        self._left_pan_anchor = None
+        # Outside the fence, a left drag pans the map. Inside the fence the
+        # left button stays reserved for picking points.
+        if not self._inside_fence(event.x, event.y):
+            self._left_pan_anchor = (event.x, event.y)
+
+    def _on_left_drag(self, event) -> None:
+        if self._left_press is None:
+            return
+        if not self._left_moved:
+            sx, sy = self._left_press
+            if math.hypot(event.x - sx, event.y - sy) < self.px(4):
+                return
+            self._left_moved = True
+            if self._left_pan_anchor is not None:
+                self.canvas.configure(cursor="fleur")
+        if self._left_pan_anchor is not None:
+            ax, ay = self._left_pan_anchor
+            self.ox += event.x - ax
+            self.oy += event.y - ay
+            self._left_pan_anchor = (event.x, event.y)
+            self._view_locked = True
+            self._redraw()
+
+    def _on_left_release(self, event) -> None:
+        moved = self._left_moved
+        self._left_press = None
+        self._left_moved = False
+        self._left_pan_anchor = None
+        if moved:
+            self.canvas.configure(cursor=self._run_cursor())
+            return
+        self._select_at(event.x, event.y)
+
+    def _select_at(self, px: float, py: float) -> None:
         if self.mode == "run":
             if self.immersive.get() and self.run is None:
-                self._start_immersive_at(event.x, event.y)
+                self._start_immersive_at(px, py)
             return
         if self.mode != "point":
             return
@@ -419,7 +576,7 @@ class CampusNavApp(MapDrawingMixin):
             return
         self._last_click = now
 
-        x, y = self._world_at(event.x, event.y)
+        x, y = self._world_at(px, py)
         lon, lat = self.cmap.proj.lonlat(x, y)
         pt = (lon, lat)
 
@@ -467,6 +624,7 @@ class CampusNavApp(MapDrawingMixin):
             self.immersive_session = session
             self.run = run
             self.run_error = None
+            self._stroll_seed = random.randrange(1, 1 << 31)
             self.canvas.configure(cursor="arrow")
         self._on_route_changed()
         self._sync_side()
@@ -524,32 +682,44 @@ class CampusNavApp(MapDrawingMixin):
 
     # ---- Pace / motion playback ------------------------------------------
     def _on_pace_slide(self, seconds: int) -> None:
-        """Slide the pace bar: keep the walked position, change only total time and speed."""
+        """Slide the pace bar: keep the walked fraction while changing speed."""
         if self._closing:
             return
         seconds = max(PACE_MIN_SEC, min(PACE_MAX_SEC, int(seconds)))
         if seconds == self.pace_seconds:
             return
-
-        total = self._anim_total
-        old_time = self._anim_total_time
-        old_sim = self._sim_time
-        if total > 0.0 and old_time > 0.0:
-            walked = total * min(1.0, max(0.0, old_sim / old_time))
-        else:
-            walked = 0.0
-
         self.pace_seconds = seconds
         self.pace_value_lbl.configure(text=fmt_duration(seconds))
-        if total > 0.0:
-            self._anim_total_time = total / 1000.0 * seconds
-            if self._anim_total_time > 0.0:
-                self._sim_time = min(
-                    self._anim_total_time,
-                    walked / total * self._anim_total_time,
-                )
-            else:
-                self._sim_time = 0.0
+        self._rebuild_anim_keep_position()
+
+    def _sync_stroll_controls(self) -> None:
+        if self.stroll.get():
+            if not self.stroll_box.winfo_manager():
+                self.stroll_box.pack(fill="x", after=self.stroll_row)
+        else:
+            self.stroll_box.pack_forget()
+
+    def _on_stroll_toggle(self) -> None:
+        self._sync_stroll_controls()
+        self._rebuild_anim_keep_position()
+
+    def _on_period_slide(self, value: int) -> None:
+        self.gps_period_sec = int(value)
+        self.period_val_lbl.configure(text=f"{self.gps_period_sec} s")
+        self._rebuild_anim_keep_position()
+
+    def _on_angle_slide(self, value: int) -> None:
+        self.heading_max_deg = int(value)
+        self.angle_val_lbl.configure(text=f"±{self.heading_max_deg}°")
+        self._rebuild_anim_keep_position()
+
+    def _rebuild_anim_keep_position(self) -> None:
+        """Regenerate the (possibly strolled) path without losing progress."""
+        old_time = self._anim_total_time
+        frac = (self._sim_time / old_time) if old_time > 0.0 else 0.0
+        frac = min(1.0, max(0.0, frac))
+        self._refresh_anim_path()
+        self._sim_time = frac * self._anim_total_time
         self._update_pace_ui()
         self._draw_pace_marker()
 
@@ -573,6 +743,9 @@ class CampusNavApp(MapDrawingMixin):
         r = self.result
         return [r.a_xy] + r.path + [r.b_xy], r.total_m, r.areas_used
 
+    def _stroll_active(self) -> bool:
+        return self.mode == "run" and self.stroll.get() and self.run is not None
+
     def _refresh_anim_path(self) -> None:
         """Rebuild playback samples from the current full route."""
         self._anim_pts = []
@@ -583,11 +756,24 @@ class CampusNavApp(MapDrawingMixin):
         track = self._active_track()
         if not track:
             return
-        pts, _total_m, _areas = track
+        pts, total_m, _areas = track
         clean = [pts[0]]
         for p in pts[1:]:
             if math.dist(clean[-1], p) > 1e-9:
                 clean.append(p)
+        if self._stroll_active():
+            anchors = list(self.run.points_xy)
+            if self.run.start_xy is not None:
+                anchors.append(self.run.start_xy)
+            stroll = build_stroll_path(
+                clean,
+                pace_sec=self.pace_seconds,
+                period_sec=self.gps_period_sec,
+                max_deg=self.heading_max_deg,
+                seed=self._stroll_seed,
+                anchors=anchors,
+            )
+            clean = list(stroll.points)
         self._anim_pts = clean
         cum = [0.0]
         for a, b in zip(clean, clean[1:]):
@@ -595,8 +781,9 @@ class CampusNavApp(MapDrawingMixin):
         self._anim_cum = cum
         self._anim_total = cum[-1] if cum else 0.0
         if self._anim_total > 0.0:
+            base_total = total_m if total_m > 0.0 else self._anim_total
             self._anim_total_time = (
-                self._anim_total / 1000.0 * self.pace_seconds
+                base_total / 1000.0 * self.pace_seconds
             )
 
     def _on_route_changed(self) -> None:
@@ -910,7 +1097,7 @@ class CampusNavApp(MapDrawingMixin):
             self.mile_val_lbls[i].grid_remove()
 
         self.hint_lbl.configure(
-            text="Left-click to pick · Wheel to zoom · Middle/right drag · Ctrl+Z undo"
+            text="Left-click to pick · Drag outside fence to pan · Wheel to zoom · Ctrl+Z undo"
         )
         if not self.hint_lbl.winfo_manager():
             self.hint_lbl.pack(side="bottom", anchor="w",
@@ -961,9 +1148,9 @@ class CampusNavApp(MapDrawingMixin):
                 else ["disabled"]
             )
             self.hint_lbl.configure(
-                text=("Click the map to choose a start · Wheel to zoom · Middle/right drag"
+                text=("Click the map to choose a start · Drag outside fence to pan"
                       if run is None
-                      else "Press Play to run · next checkpoint appears on arrival")
+                      else "Press Play to run · Drag outside fence to pan")
             )
         else:
             self.action_btn.configure(text="Refresh", command=self._generate_run)
@@ -973,7 +1160,7 @@ class CampusNavApp(MapDrawingMixin):
                 else ["disabled"]
             )
             self.hint_lbl.configure(
-                text="Numbers show the order · Wheel to zoom · Middle/right drag · Refresh to randomize"
+                text="Numbers show the order · Drag outside fence to pan · Refresh to randomize"
             )
 
     def _normal_run_status(self, run: PointRun | None) -> str:
@@ -1197,6 +1384,8 @@ class CampusNavApp(MapDrawingMixin):
         self.run = run
         if run is None and not self.run_error:
             self.run_error = "Could not generate a scoring run. Please try again."
+        elif run is not None:
+            self._stroll_seed = random.randrange(1, 1 << 31)
         self._on_route_changed()
         self._sync_side()
         self._fit_view()
@@ -1227,6 +1416,7 @@ class CampusNavApp(MapDrawingMixin):
             return
         self.run = run
         self.run_error = None
+        self._stroll_seed = random.randrange(1, 1 << 31)
         self._on_route_changed()
         self._sync_side()
         self._redraw()
