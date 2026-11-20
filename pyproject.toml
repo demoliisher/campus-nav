@@ -1,0 +1,23 @@
+[project]
+name = "campus-nav"
+version = "1.3.0"
+description = "Campus navigation for GDPU ZS: shortest routes, distances, and simulated scoring runs"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+campus-nav = "campus_nav.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=9.0.0"]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The global %TEMP% pytest-current symlink occasionally hits permission errors
+# on Windows; keep the temporary directory inside the project instead.
+addopts = ["--basetemp=.pytest_tmp"]

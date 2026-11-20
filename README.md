@@ -1,0 +1,184 @@
+# campus-nav
+
+A desktop demo for **GDPU ZS** navigation. It is built with Python and tkinter,
+loads campus road and fence GeoJSON data, and lets you pick points on the map,
+compute the shortest route, inspect distances, and watch a simulated scoring
+run with pace playback.
+
+The UI uses GCJ-02 coordinates throughout.
+
+## Interface preview
+
+![Immersive simulation](docs/immersive.png)
+
+## Features
+
+- **Two-point routing**: left-click to select points A and B (undoable). Each
+  point is projected orthogonally onto the nearest road, producing C and D.
+  The temporary links AC and BD connect the points to the network, and
+  Dijkstra finds the shortest C -> D route. The full route is highlighted.
+- **Distance breakdown**: total distance = temporary link AC + campus route
+  C -> D + temporary link D -> B, shown item by item in the sidebar.
+- **Polygon semantics**:
+  - `traverse: "area"`: the interior is freely traversable and the whole area
+    is highlighted when crossed.
+  - `traverse: "ring"`: traffic is allowed only along the boundary ring.
+  - `run_direction: "ccw" / "cw"`: the ring is one-way in the given direction
+    (the running track is counterclockwise).
+- **Campus fence**: loads the electronic fence supplied by the server
+  (`traverse: "fence"`) and draws it at the bottom of the map with a pale
+  green fill and a green dashed boundary. The initial view fits the roads and
+  the fence together.
+- **Pace playback**: adjust the pace with a slider from 0'05'' to 10'00'' per
+  kilometer (default 5'00''). Press Play to move a directional arrow at the
+  real pace; drag the slider to its minimum for a quick preview. The large
+  mileage readout shows the **distance already walked from the start**, while
+  the small line below keeps the full route distance.
+- **Simulated scoring run**: generates five ordered waypoints on roads and
+  plans the route 1 -> 2 -> 3 -> 4 -> 5.
+  - **Immersive simulation**: select a start point on the map (not a
+    checkpoint). The app connects it to the nearest road and immediately
+    reveals checkpoint 1; each further checkpoint is generated only after the
+    current one is reached. During playback, reaching a target reveals the
+    next leg automatically.
+  - **Reduce backtracking**: avoids an immediate 180-degree reversal at a
+    checkpoint by excluding the reverse of the last edge; if that leaves no
+    route, the exclusion is dropped automatically.
+  - **Daily cap extension**: after the five checkpoints, the route heads for
+    the running track and continues counterclockwise until the daily cap is
+    reached (8 km for male, 5 km for female, male by default). It can be
+    combined freely with reduce backtracking.
+
+## Requirements
+
+- Python >= 3.10 (the standard-library `tkinter` module is required)
+- [uv](https://docs.astral.sh/uv/)
+
+## Quick start
+
+```bash
+cd campus-nav
+uv sync
+uv run campus-nav
+```
+
+Other entry points:
+
+```bash
+uv run python -m campus_nav          # equivalent entry point
+uv run campus-nav --check            # run road/algorithm checks only, no window
+uv run campus-nav --map other.geojson
+uv run campus-nav --fence other_fence.geojson
+uv run campus-nav --demo 113.41518,22.47824,113.41333,22.47436
+```
+
+`uv sync` creates `.venv/`, installs the project itself, and generates
+`uv.lock`. For day-to-day work, run everything through `uv run ...`; activating
+the virtual environment manually is unnecessary.
+
+## Project layout
+
+```text
+campus-nav/
+├── pyproject.toml
+├── uv.lock
+├── README.md
+├── docs/
+│   └── immersive.png            # immersive simulation preview
+├── scripts/
+│   └── build_gcj02_data.py      # WGS-84 roads / BD-09 fence -> GCJ-02
+├── src/
+│   └── campus_nav/
+│       ├── __init__.py
+│       ├── __main__.py          # python -m campus_nav
+│       ├── cli.py               # CLI / --map / --fence / --check / --demo
+│       ├── config.py            # package paths, default map and fence
+│       ├── checks.py            # --check self-test (49 items)
+│       ├── formatting.py        # distance and longitude/latitude formatting
+│       ├── pacing.py            # pace parsing and formatting
+│       ├── data/
+│       │   ├── map_wgs84.geojson    # road source data (WGS-84)
+│       │   ├── map_gcj02.geojson    # default map for the UI (GCJ-02)
+│       │   ├── fence_bd09.geojson   # server fence source data (BD-09)
+│       │   └── fence_gcj02.geojson  # default fence for the UI (GCJ-02)
+│       ├── geo/
+│       │   ├── projection.py    # longitude/latitude -> local metric plane
+│       │   ├── datum.py         # WGS-84 / BD-09 -> GCJ-02
+│       │   ├── fence.py         # fence GeoJSON loader
+│       │   ├── polygons.py      # point/segment vs. polygon tests
+│       │   └── paths.py         # polyline midpoint, interpolation, stitching
+│       ├── routing/
+│       │   ├── models.py        # Edge / Area / RouteResult / PointRun
+│       │   ├── dijkstra.py      # Dijkstra with forbidden-direction support
+│       │   ├── campus_map.py    # graph construction, routing, run planning
+│       │   └── immersive.py     # immersive state machine (one-by-one reveal)
+│       └── ui/
+│           ├── app.py           # main window, interaction, sidebar, playback
+│           ├── widgets.py       # pace slider (rheostat style)
+│           ├── drawing.py       # canvas viewport and drawing
+│           ├── dpi.py           # Windows high-DPI support
+│           └── theme.py         # colors and fonts
+└── tests/
+    ├── conftest.py
+    ├── test_pacing.py
+    ├── test_geo.py
+    ├── test_datum.py
+    ├── test_fence.py
+    ├── test_routing.py
+    ├── test_immersive.py
+    ├── test_formatting.py
+    └── test_cli.py
+```
+
+## Map data
+
+The GUI loads `src/campus_nav/data/map_gcj02.geojson` and
+`src/campus_nav/data/fence_gcj02.geojson` by default; both are shipped with the
+package. Use `--map` / `--fence` to point at other files. Coordinates are
+**GCJ-02** longitude/latitude. Feature attributes are:
+
+| Attribute | Meaning |
+| --- | --- |
+| `desc` | Road/area display name, used in the sidebar and road labels |
+| `traverse` | `area` = freely traversable interior; `ring` = boundary only; `fence` = display-only fence |
+| `run_direction` | `ccw` / `cw`, only for `ring`, sets the one-way direction |
+
+Source data is kept under `data/`: roads are WGS-84 (`map_wgs84.geojson`) and
+the server fence is exported from its `lat/lng` fields as BD-09
+(`fence_bd09.geojson`). After editing a source file, regenerate the GCJ-02
+files:
+
+```bash
+uv run python scripts/build_gcj02_data.py
+```
+
+## Algorithm notes
+
+1. Build a local equirectangular projection around the center point and convert
+   longitude/latitude to meters. Before projection, `geo/datum.py` normalizes
+   the datum (roads from WGS-84, fence from BD-09).
+2. Merge duplicate vertices within a tolerance and build an undirected graph
+   from all lines and rings; rings with `run_direction` get one-way edges.
+3. When selecting points, project A and B onto the nearest road at C and D,
+   then split the original edge by inserting virtual nodes.
+4. For `area` polygons, precompute visibility chords between boundary vertices
+   so the router can cross the interior and record the whole area for
+   highlighting.
+5. Run Dijkstra from C to D. Reduce backtracking forbids the reverse of the
+   edge just traversed during the search.
+6. For the daily cap extension, the track entrance acts as a hidden sixth
+   point: route to the track, then continue along the counterclockwise
+   boundary for the remaining distance (multiple laps are allowed) and
+   truncate the final path by length.
+
+## Development and testing
+
+```bash
+uv sync
+uv run pytest
+uv run campus-nav --check
+```
+
+`test_self_check_passes` in `uv run pytest` runs the same 49 checks as
+`--check`. The remaining tests cover pace parsing, datum conversion, fence
+alignment, geometry helpers, routing, and scoring-run behavior.
