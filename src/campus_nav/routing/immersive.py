@@ -14,11 +14,15 @@ from .models import CapExtension, PointRun, RouteResult
 class ImmersiveSession:
     """Immersive scoring run.
 
-    Unlike ``CampusMap.plan_point_run``, which generates all five points at
-    once, this session reveals one checkpoint at a time: the next checkpoint
-    is generated only after the current target is reached. The user picks the
-    start point on the map; the first leg projects it orthogonally onto the
-    nearest road (a temporary connector) before joining the network.
+    The whole five-checkpoint run (and the optional daily-cap extension) is
+    planned when the start point is chosen; playback only reveals it one
+    checkpoint at a time. Keeping the full plan around lets the UI preview all
+    five checkpoints and their walk path without consuming the generator, and
+    restart the same run afterwards.
+
+    The user picks the start point on the map; the first leg projects it
+    orthogonally onto the nearest road (a temporary connector) before joining
+    the network.
     """
 
     def __init__(self, cmap: CampusMap, n: int = 5, min_sep_m: float = 60.0,
@@ -35,20 +39,19 @@ class ImmersiveSession:
         self.run: PointRun | None = None
         self._start_xy: tuple[float, float] | None = None
         self._start_ll: tuple[float, float] | None = None
-        self._points_xy: list[tuple[float, float]] = []
         self._points_ll: list[tuple[float, float]] = []
+        self._points_xy: list[tuple[float, float]] = []
         self._legs: list[RouteResult] = []
         self._leg_m: list[float] = []
-        self._path: list[tuple[float, float]] = []
-        self._areas: set[int] = set()
-        self._last_dir: tuple[int, bool] | None = None
+        self._leg_areas: list[frozenset[int]] = []
+        self._cap: CapExtension | None = None
+        self._revealed = 0
         self._completed = 0
         self._finished = False
-        self._cap: CapExtension | None = None
 
     # ---- Public state ----------------------------------------------------
     def start(self, start_xy: tuple[float, float]) -> PointRun | None:
-        """Use a map point as the start, reveal checkpoint 1, and plan the connector."""
+        """Use a map point as the start and plan the complete run."""
         if self.run is not None:
             return self.run
 
@@ -67,57 +70,65 @@ class ImmersiveSession:
         self._points_xy = [cp_xy]
         self._legs = [leg]
         self._leg_m = [leg.total_m]
+        self._leg_areas = [frozenset(leg.areas_used)]
         self._snap_leg(leg, start_xy, cp_xy)
-        self._path = [start_xy]
-        append_path(self._path, leg.path)
-        self._last_dir = leg.last_dir
-        self._areas = set(leg.areas_used)
+
+        while len(self._legs) < self.n:
+            source = self._points_xy[-1]
+            cp_ll = self._new_point(self._points_xy + [self._start_xy])
+            if cp_ll is None:
+                return None
+            cp_xy = self.cmap.proj.xy(*cp_ll)
+            leg = self.cmap.shortest_route(
+                source, cp_xy, avoid_dirs=self._avoid_dirs()
+            )
+            if leg is None:
+                return None
+            self._snap_leg(leg, source, cp_xy)
+            self._points_ll.append(cp_ll)
+            self._points_xy.append(cp_xy)
+            self._legs.append(leg)
+            self._leg_m.append(leg.total_m)
+            self._leg_areas.append(frozenset(leg.areas_used))
+
+        self._cap = self._plan_cap()
+        self._revealed = 1
         self._completed = 0
         self._finished = False
-        self._cap = None
         self.run = self._snapshot()
         return self.run
 
     def advance(self) -> PointRun | None:
-        """Called after the current target is reached: reveal the next checkpoint, finish, or extend to the cap."""
+        """Reveal the next checkpoint (or finish after the last one)."""
         if self.run is None:
             return None
         if self._finished:
             return self.run
 
-        next_completed = self._completed + 1
-        if next_completed >= self.n:
-            # The last checkpoint has been reached: extend to the track if
-            # requested, then finish.
-            self._completed = next_completed
-            self._apply_cap()
+        if self._revealed >= self.n:
+            self._completed = self.n
             self._finished = True
-            self.run = self._snapshot()
-            return self.run
-
-        current_xy = self._points_xy[-1]
-        cp_ll = self._new_point(self._points_xy + [self._start_xy])
-        if cp_ll is None:
-            return None
-        cp_xy = self.cmap.proj.xy(*cp_ll)
-        avoid = None
-        if self.reduce_backtrack and self._last_dir is not None:
-            avoid = {self._last_dir}
-        leg = self.cmap.shortest_route(current_xy, cp_xy, avoid_dirs=avoid)
-        if leg is None:
-            return None
-
-        self._completed = next_completed
-        self._snap_leg(leg, current_xy, cp_xy)
-        self._points_ll.append(cp_ll)
-        self._points_xy.append(cp_xy)
-        self._legs.append(leg)
-        self._leg_m.append(leg.total_m)
-        append_path(self._path, leg.path)
-        self._last_dir = leg.last_dir
-        self._areas.update(leg.areas_used)
+        else:
+            self._revealed += 1
+            self._completed = self._revealed - 1
         self.run = self._snapshot()
         return self.run
+
+    def restart(self) -> PointRun | None:
+        """Rewind to the first checkpoint, keeping the planned run."""
+        if self.run is None:
+            return None
+        self._revealed = 1
+        self._completed = 0
+        self._finished = False
+        self.run = self._snapshot()
+        return self.run
+
+    def full_snapshot(self) -> PointRun | None:
+        """All planned checkpoints and legs, without changing the reveal state."""
+        if self.run is None:
+            return None
+        return self._snapshot(revealed=self.n, completed=0, finished=False)
 
     # ---- Internal --------------------------------------------------------
     def _new_point(self, exclude) -> tuple[float, float] | None:
@@ -131,6 +142,20 @@ class ImmersiveSession:
                 return p
         return None
 
+    def _avoid_dirs(self) -> set[tuple[int, bool]] | None:
+        if not self.reduce_backtrack or not self._legs:
+            return None
+        last = self._legs[-1].last_dir
+        return {last} if last is not None else None
+
+    def _plan_cap(self) -> CapExtension | None:
+        if not self.run_limit or self.daily_cap_m <= 0.0 or not self._legs:
+            return None
+        return self.cmap.plan_cap_extension(
+            self._points_xy[-1], sum(self._leg_m), self.daily_cap_m,
+            avoid_dirs=self._avoid_dirs(),
+        )
+
     @staticmethod
     def _snap_leg(leg: RouteResult,
                   source_xy: tuple[float, float],
@@ -143,32 +168,34 @@ class ImmersiveSession:
         if math.dist(leg.path[-1], dest_xy) <= 1.0:
             leg.path[-1] = dest_xy
 
-    def _apply_cap(self) -> None:
-        if not self.run_limit or self.daily_cap_m <= 0.0:
-            return
-        base_total = sum(self._leg_m)
-        avoid = None
-        if self.reduce_backtrack and self._last_dir is not None:
-            avoid = {self._last_dir}
-        extension = self.cmap.plan_cap_extension(
-            self._points_xy[-1], base_total, self.daily_cap_m,
-            avoid_dirs=avoid,
+    def _snapshot(self, revealed: int | None = None,
+                  completed: int | None = None,
+                  finished: bool | None = None) -> PointRun:
+        revealed = (self._revealed if revealed is None
+                    else max(1, min(self.n, int(revealed))))
+        completed = self._completed if completed is None else int(completed)
+        finished = self._finished if finished is None else bool(finished)
+        legs = self._legs[:revealed]
+        path: list[tuple[float, float]] = (
+            [self._start_xy] if self._start_xy is not None else []
         )
-        self._cap = extension
-        append_path(self._path, extension.path)
-        self._areas.update(extension.areas_used)
-
-    def _snapshot(self) -> PointRun:
-        base_total = sum(self._leg_m)
-        extension = self._cap
+        areas: set[int] = set()
+        for leg, leg_areas in zip(legs, self._leg_areas[:revealed]):
+            append_path(path, leg.path)
+            areas.update(leg_areas)
+        extension = self._cap if finished else None
+        if extension is not None:
+            append_path(path, extension.path)
+            areas.update(extension.areas_used)
+        base_total = sum(self._leg_m[:revealed])
         return PointRun(
-            points_lonlat=list(self._points_ll),
-            points_xy=list(self._points_xy),
-            legs=list(self._legs),
-            path=list(self._path),
-            leg_m=list(self._leg_m),
+            points_lonlat=list(self._points_ll[:revealed]),
+            points_xy=list(self._points_xy[:revealed]),
+            legs=list(legs),
+            path=path,
+            leg_m=list(self._leg_m[:revealed]),
             total_m=base_total + (extension.extra_m if extension else 0.0),
-            areas_used=frozenset(self._areas),
+            areas_used=frozenset(areas),
             cap_m=extension.cap_m if extension else 0.0,
             transit_m=extension.transit_m if extension else 0.0,
             track_m=extension.track_m if extension else 0.0,
@@ -178,6 +205,6 @@ class ImmersiveSession:
             kind="immersive",
             start_lonlat=self._start_ll,
             start_xy=self._start_xy,
-            completed=self._completed,
-            finished=self._finished,
+            completed=completed,
+            finished=finished,
         )

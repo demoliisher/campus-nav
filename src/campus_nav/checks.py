@@ -318,6 +318,12 @@ def run_check(cmap: CampusMap) -> bool:
           and len(ir.points_xy) == 1 and ir.legs[0].ac_m > 0.0,
           f"connector {ir.legs[0].ac_m:.1f} m" if ir else "no solution")
     if ir is not None:
+        preview = immersive.full_snapshot()
+        check("Immersive preview plans all five checkpoints",
+              preview is not None and len(preview.points_xy) == 5
+              and len(preview.legs) == 5 and not preview.finished
+              and len(ir.points_xy) == 1 and preview.total_m > ir.total_m,
+              f"{preview.total_m:.0f} m" if preview else "no solution")
         counts = [len(ir.points_xy)]
         for _ in range(4):
             ir = immersive.advance()

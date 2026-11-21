@@ -55,6 +55,34 @@ def test_checkpoints_revealed_one_by_one(cmap, start_xy):
     assert len(run.legs) == 5
 
 
+def test_full_snapshot_plans_five_and_keeps_the_reveal(cmap, start_xy):
+    session = ImmersiveSession(cmap, rng=random.Random(20261120))
+    run = session.start(start_xy)
+    assert run is not None and len(run.points_xy) == 1
+
+    full = session.full_snapshot()
+    assert full is not None
+    assert len(full.points_xy) == 5
+    assert len(full.legs) == 5
+    assert full.completed == 0
+    assert not full.finished
+    assert full.total_m > run.total_m
+    assert full.total_m == pytest.approx(_path_len(full.path), abs=1e-6)
+
+    # The preview did not consume the reveal: checkpoint 2 is still next.
+    nxt = session.advance()
+    assert nxt is not None and len(nxt.points_xy) == 2
+    assert nxt.points_xy[:2] == full.points_xy[:2]
+
+    # Restart rewinds the same plan to the first checkpoint.
+    rewound = session.restart()
+    assert rewound is not None
+    assert len(rewound.points_xy) == 1
+    assert rewound.points_xy[0] == full.points_xy[0]
+    assert rewound.completed == 0
+    assert not rewound.finished
+
+
 def test_checkpoints_on_roads_and_separated(cmap, start_xy):
     session = ImmersiveSession(
         cmap, min_sep_m=60.0, rng=random.Random(20261120)

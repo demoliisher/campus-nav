@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Live trajectory: the green trail must grow during playback, not only on redraw."""
 
+import math
+
 import pytest
 
 tk = pytest.importorskip("tkinter")
@@ -97,6 +99,19 @@ def test_new_walk_rerolls_and_previews_the_same_checkpoints(app, cmap):
     assert app._walk_preview
     assert app._anim_pts != old_points
     assert list(app.run.points_xy) == checkpoints
+    # The preview plans and shows all five checkpoints without advancing the run.
+    assert app._preview_run is not None
+    assert len(app._preview_run.points_xy) == 5
+    assert len(app._preview_run.legs) == 5
+    assert app._preview_run.total_m > app.run.total_m
+    assert app.run.completed == 0
+    # The preview walk visits all five checkpoints (a checkpoint that needs a
+    # U-turn is passed around by the turn-around loop, which stays inside the
+    # 10 m road).
+    assert all(
+        min(math.dist(p, cp) for p in app._anim_pts) < 5.0
+        for cp in app._preview_run.points_xy
+    )
     # The preview draws the whole walk and hides the pace arrow.
     app._update_trail()
     assert _trail_length(app) == len(app._anim_pts)
@@ -106,10 +121,14 @@ def test_new_walk_rerolls_and_previews_the_same_checkpoints(app, cmap):
     second = list(app._anim_pts)
     app._on_new_walk()
     assert app._anim_pts != second
+    assert len(app._preview_run.points_xy) == 5
 
-    # Play drops the preview and starts from the beginning.
+    # Play rewinds to the immersive reveal and starts from the beginning.
     app._toggle_play()
     assert not app._walk_preview
+    assert app._preview_run is None
+    assert len(app.run.points_xy) == 1
+    assert app.run.completed == 0
     assert len(app._trail_points()) == 1
     app._stop_animation()
 

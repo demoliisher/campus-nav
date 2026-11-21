@@ -76,6 +76,7 @@ class CampusNavApp(MapDrawingMixin):
         self.gps_period_sec = 1
         self.heading_max_deg = 3
         self._stroll_seed = 0
+        self._preview_run: PointRun | None = None
 
         # Viewport
         self.scale = 0.0
@@ -784,25 +785,33 @@ class CampusNavApp(MapDrawingMixin):
         if not self.stroll.get():
             # The plain route must stay hidden in immersive mode.
             self._walk_preview = False
+            self._preview_run = None
         self._sync_stroll_controls()
         self._rebuild_anim_keep_position()
 
     def _on_new_walk(self) -> None:
-        """Re-roll the stroll for the same checkpoints and preview the whole path."""
+        """Re-roll the walk for the same run and preview all five checkpoints."""
         if self.mode != "immersive" or self.run is None:
+            return
+        if self.immersive_session is None:
+            return
+        full = self.immersive_session.full_snapshot()
+        if full is None:
             return
         if not self.stroll.get():
             self.stroll.set(True)
             self._sync_stroll_controls()
         self._stop_animation()
         self._stroll_seed = random.randrange(1, 1 << 31)
-        self._sim_time = 0.0
+        self._preview_run = full
         self._walk_preview = True
+        self._sim_time = 0.0
         self._refresh_anim_path()
         self._update_pace_ui()
         self._update_trail()
         self._draw_pace_marker()
-        self._sync_immersive_side()
+        self._sync_side()
+        self._redraw()
 
     def _on_period_slide(self, value: int) -> None:
         self.gps_period_sec = int(value)
@@ -836,15 +845,22 @@ class CampusNavApp(MapDrawingMixin):
             self._anim_after = None
         self._playing = False
 
+    def _view_run(self) -> PointRun | None:
+        """Run used for drawing: the full preview while New walk is showing."""
+        if self._walk_preview and self._preview_run is not None:
+            return self._preview_run
+        return self.run
+
     def _active_track(self):
         """Full route used for drawing/playback in the current mode: (points, distance, areas)."""
         if self.mode == "route":
             if not self.plan:
                 return None
             return self.plan.path, self.plan.total_m, self.plan.areas_used
-        if not self.run:
+        run = self._view_run()
+        if not run:
             return None
-        return self.run.path, self.run.total_m, self.run.areas_used
+        return run.path, run.total_m, run.areas_used
 
     def _stroll_active(self) -> bool:
         return self.mode == "immersive" and self.stroll.get() and self.run is not None
@@ -867,9 +883,10 @@ class CampusNavApp(MapDrawingMixin):
             if math.dist(clean[-1], p) > 1e-9:
                 clean.append(p)
         if self._stroll_active():
-            anchors = list(self.run.points_xy)
-            if self.run.start_xy is not None:
-                anchors.append(self.run.start_xy)
+            run = self._view_run() or self.run
+            anchors = list(run.points_xy)
+            if run.start_xy is not None:
+                anchors.append(run.start_xy)
             stroll = build_stroll_path(
                 clean,
                 pace_sec=self.pace_seconds,
@@ -894,6 +911,7 @@ class CampusNavApp(MapDrawingMixin):
     def _on_route_changed(self) -> None:
         self._stop_animation()
         self._walk_preview = False
+        self._preview_run = None
         self._sim_time = 0.0
         self._refresh_anim_path()
         self._update_pace_ui()
@@ -952,8 +970,16 @@ class CampusNavApp(MapDrawingMixin):
             self._update_pace_ui()
             return
         if self._walk_preview:
+            # Play turns the preview back into the immersive reveal: hide the
+            # unvisited checkpoints, clear the trace, and start from the top.
             self._walk_preview = False
-            self._sync_immersive_side()
+            self._preview_run = None
+            if self.immersive_session is not None:
+                self.run = self.immersive_session.restart()
+            self._sim_time = 0.0
+            self._refresh_anim_path()
+            self._sync_side()
+            self._redraw()
         if self._sim_time >= self._anim_total_time - 1e-9:
             self._sim_time = 0.0
         self._playing = True
@@ -1028,6 +1054,20 @@ class CampusNavApp(MapDrawingMixin):
             fg="#39414d" if can_walk else "#9aa5b4",
             cursor="hand2" if can_walk else "arrow",
         )
+
+        if self._walk_preview and self._preview_run is not None and has_route:
+            self.total_lbl.configure(text="Preview", fg=C_ROUTE)
+            self.mileage_sub_lbl.configure(
+                text=f"{len(self._preview_run.points_xy)} checkpoints · "
+                     f"Total {fmt_len(total_m)}"
+            )
+            self.pace_dist_lbl.configure(text="All five checkpoints")
+            self.pace_time_lbl.configure(text=fmt_duration(total_t))
+            self._draw_pace_bar(0.0)
+            self.play_btn.configure(
+                state="normal", bg=C_PACE, fg="#ffffff", text="Play"
+            )
+            return
 
         if total_m is None:
             self.total_lbl.configure(text="No route", fg=C_MUTED)
@@ -1347,7 +1387,7 @@ class CampusNavApp(MapDrawingMixin):
         )
 
     def _sync_immersive_side(self) -> None:
-        run = self.run
+        run = self._view_run()
         if self.run_error:
             status, color = self.run_error, "#b3261e"
         elif run is None:
@@ -1355,19 +1395,24 @@ class CampusNavApp(MapDrawingMixin):
                 "Immersive: click the map to choose a start point (not a checkpoint).",
                 C_STATUS_FG,
             )
+        elif self._walk_preview:
+            status = (f"Preview: {len(run.points_xy)} checkpoints, "
+                      f"{fmt_len(run.total_m)} total. Press Play to run them "
+                      f"one by one.")
+            color = C_STATUS_FG
         else:
             status, color = self._immersive_status(run), C_STATUS_FG
         self.status_lbl.configure(text=status, fg=color)
 
-        active = run is not None or self.run_error or self.immersive_session is not None
+        active = self.run is not None or self.run_error or self.immersive_session is not None
         self.action_btn.configure(text="New start", command=self._restart_immersive)
         self.action_btn.state(["!disabled"] if active else ["disabled"])
 
         self._sync_immersive_mileage(run)
 
         if self._walk_preview:
-            hint = ("Preview: a fresh walk path for the same checkpoints · "
-                    "Press Play to run it")
+            hint = ("Preview: all five checkpoints and the full walk path · "
+                    "Press Play to run them one by one")
         elif run is None:
             hint = ("Click the map for the start · Wheel to zoom · "
                     "Drag outside fence to pan")

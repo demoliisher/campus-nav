@@ -5,6 +5,6 @@ Shortest routes on the campus road network, distance calculation, pace
 playback, and simulated scoring runs.
 """
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 __all__ = ["__version__"]

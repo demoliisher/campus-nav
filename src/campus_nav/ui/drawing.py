@@ -95,8 +95,9 @@ class MapDrawingMixin:
                 self._draw_plan(self.plan)
             self._draw_picked_points()
         elif self.mode == "immersive":
-            if self.run:
-                self._draw_immersive(self.run)
+            run = self._view_run()
+            if run:
+                self._draw_immersive(run)
         self._draw_pace_marker()
         self._draw_scalebar()
         self._draw_north()
@@ -331,12 +332,14 @@ class MapDrawingMixin:
                           tags="endpoint")
 
         # Revealed checkpoints: completed ones are filled; the current target is outlined.
+        # In the New walk preview every planned checkpoint is shown plain.
+        preview = self._walk_preview
         last = len(run.points_xy) - 1
         for idx, p in enumerate(run.points_xy):
             self._number_marker(
                 p, idx + 1,
-                filled=idx < run.completed,
-                halo=(idx == last and not run.finished),
+                filled=not preview and idx < run.completed,
+                halo=not preview and idx == last and not run.finished,
             )
 
     def _draw_pace_marker(self) -> None:

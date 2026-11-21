@@ -38,11 +38,11 @@ The window has two modes.
 ### Immersive simulation
 
 - **Live playback**: pick a start point on the map (not a checkpoint). The app
-  connects it to the nearest road and reveals checkpoint 1; each further
-  checkpoint is generated only after the current one is reached. The planned
-  route is deliberately **not drawn**, so the green line shows only the
-  real-time trajectory actually covered; the moving pace arrow marks the
-  current position.
+  connects it to the nearest road, plans the whole five-point run, and reveals
+  checkpoint 1; each further checkpoint appears only after the current one is
+  reached. The planned route is deliberately **not drawn**, so the green line
+  shows only the real-time trajectory actually covered; the moving pace arrow
+  marks the current position.
 - **Gate roads**: features carrying `random_exclude: true` are never used when
   checkpoints are generated. Only the gate-side stretch is marked: the road
   from West Gate 2 is split at West Avenue, so its inner half stays eligible.
@@ -63,12 +63,14 @@ The window has two modes.
   turn and `a + d` for a left turn, with `a` the half road width and `d` the
   lane offset), so the trail walks around the junction instead of cutting it;
   a checkpoint that requires doubling back is reached with a half-circle loop
-  rather than an acute angle. A **New walk** button next to Play re-rolls the
-  wander for the same checkpoints and previews the whole path, which makes it
-  easy to sample several variants quickly. The location interval (1-10 s) and
-  maximum heading noise (0 to +/-5 degrees) are adjustable. The full wander
-  path is generated before playback starts, so the arrow never pauses to
-  search for the next target.
+  rather than an acute angle. A **New walk** button next to Play plans all five
+  checkpoints up front, re-rolls the wander for them and previews the complete
+  path, which makes it easy to sample several variants quickly. Pressing Play
+  then rewinds to the normal immersive reveal: the preview path is cleared, the
+  unvisited checkpoints are hidden again, and the run starts from the first
+  checkpoint. The location interval (1-10 s) and maximum heading noise (0 to
+  +/-5 degrees) are adjustable. The full wander path is generated before
+  playback starts, so the arrow never pauses to search for the next target.
 
 ### Both modes
 
@@ -249,7 +251,7 @@ uv run pytest
 uv run campus-nav --check
 ```
 
-`test_self_check_passes` in `uv run pytest` runs the same 54 checks as
+`test_self_check_passes` in `uv run pytest` runs the same 55 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
 alignment, stroll-path smoothness and bounds, arrow sampling, snap radius,
 live-trail playback, geometry helpers, routing, and scoring-run behavior.
