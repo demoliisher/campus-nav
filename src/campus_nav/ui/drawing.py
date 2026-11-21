@@ -268,6 +268,9 @@ class MapDrawingMixin:
         if (not self._anim_pts or self._anim_total <= 0.0
                 or self._anim_total_time <= 0.0):
             return []
+        if self._walk_preview:
+            # The walk re-roll shows the whole path before playback starts.
+            return list(self._anim_pts)
         frac = min(1.0, max(0.0, self._sim_time / self._anim_total_time))
         return truncate_path(self._anim_pts, frac * self._anim_total)
 
@@ -341,6 +344,8 @@ class MapDrawingMixin:
         c.delete("pace_arrow")
         if (not self._anim_pts or self._anim_total <= 0.0
                 or self._anim_total_time <= 0.0):
+            return
+        if self._walk_preview:
             return
         frac = min(1.0, max(0.0, self._sim_time / self._anim_total_time))
         got = self._point_on_route(frac * self._anim_total)

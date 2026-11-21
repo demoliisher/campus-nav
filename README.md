@@ -58,14 +58,17 @@ The window has two modes.
   (8 km for male, 5 km for female, male by default).
 - **Stroll**: every road and ring is treated as a centerline with a uniform
   10 m width. The moving arrow keeps to the right side, may wander inside that
-  lane, and returns to the centerline at checkpoints. Corners are followed as
-  rounded arcs instead of stepping on the raw GeoJSON vertices, the lane is
-  pulled toward the inside of a turn so the trail never folds over itself, and
+  lane, and returns to the centerline at checkpoints. Every corner is rounded
+  by an arc tangent to the right lane on both sides (radius `a - d` for a right
+  turn and `a + d` for a left turn, with `a` the half road width and `d` the
+  lane offset), so the trail walks around the junction instead of cutting it;
   a checkpoint that requires doubling back is reached with a half-circle loop
-  rather than an acute angle. The location interval (1-10 s) and maximum
-  heading noise (0 to +/-5 degrees) are adjustable. The full wander path is
-  generated before playback starts, so the arrow never pauses to search for
-  the next target.
+  rather than an acute angle. A **New walk** button next to Play re-rolls the
+  wander for the same checkpoints and previews the whole path, which makes it
+  easy to sample several variants quickly. The location interval (1-10 s) and
+  maximum heading noise (0 to +/-5 degrees) are adjustable. The full wander
+  path is generated before playback starts, so the arrow never pauses to
+  search for the next target.
 
 ### Both modes
 

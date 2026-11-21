@@ -84,6 +84,36 @@ def test_redraw_recreates_the_trail_once_at_the_current_position(app, cmap):
     assert _trail_length(app) >= 2
 
 
+def test_new_walk_rerolls_and_previews_the_same_checkpoints(app, cmap):
+    _start_run(app, cmap)
+    assert app.walk_btn.cget("state") == "normal"
+    old_seed = app._stroll_seed
+    old_points = list(app._anim_pts)
+    checkpoints = list(app.run.points_xy)
+
+    app._on_new_walk()
+    assert app.stroll.get()
+    assert app._stroll_seed != old_seed
+    assert app._walk_preview
+    assert app._anim_pts != old_points
+    assert list(app.run.points_xy) == checkpoints
+    # The preview draws the whole walk and hides the pace arrow.
+    app._update_trail()
+    assert _trail_length(app) == len(app._anim_pts)
+    assert not app.canvas.find_withtag("pace_arrow")
+
+    # A second click gives another walk for the same checkpoints.
+    second = list(app._anim_pts)
+    app._on_new_walk()
+    assert app._anim_pts != second
+
+    # Play drops the preview and starts from the beginning.
+    app._toggle_play()
+    assert not app._walk_preview
+    assert len(app._trail_points()) == 1
+    app._stop_animation()
+
+
 def test_trail_stays_below_the_markers(app, cmap):
     _start_run(app, cmap)
     app._sim_time = app._anim_total_time * 0.5

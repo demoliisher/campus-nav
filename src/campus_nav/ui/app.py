@@ -96,6 +96,7 @@ class CampusNavApp(MapDrawingMixin):
         self._anim_after: str | None = None
         self._last_tick = 0.0
         self._sim_time = 0.0
+        self._walk_preview = False
         self._anim_pts: list[tuple[float, float]] = []
         self._anim_cum: list[float] = []
         self._anim_total = 0.0
@@ -260,6 +261,14 @@ class CampusNavApp(MapDrawingMixin):
             padx=P(9), pady=P(3), cursor="hand2", state="disabled",
         )
         self.play_btn.pack(side="right")
+        self.walk_btn = tk.Button(
+            pace_row, text="New walk", command=self._on_new_walk,
+            font=(FONT_UI, 9), bg="#e3e8ef", fg="#39414d",
+            activebackground=C_PACE, activeforeground="#ffffff",
+            disabledforeground="#9aa5b4", relief="flat", bd=0,
+            padx=P(6), pady=P(3), cursor="hand2", state="disabled",
+        )
+        self.walk_btn.pack(side="right", padx=(0, P(4)))
         self.pace_value_lbl = tk.Label(
             pace_row, text=fmt_duration(self.pace_seconds),
             font=(FONT_MONO, 9), fg=C_TEXT, bg=C_SIDEBAR,
@@ -772,8 +781,28 @@ class CampusNavApp(MapDrawingMixin):
             self.stroll_box.pack_forget()
 
     def _on_stroll_toggle(self) -> None:
+        if not self.stroll.get():
+            # The plain route must stay hidden in immersive mode.
+            self._walk_preview = False
         self._sync_stroll_controls()
         self._rebuild_anim_keep_position()
+
+    def _on_new_walk(self) -> None:
+        """Re-roll the stroll for the same checkpoints and preview the whole path."""
+        if self.mode != "immersive" or self.run is None:
+            return
+        if not self.stroll.get():
+            self.stroll.set(True)
+            self._sync_stroll_controls()
+        self._stop_animation()
+        self._stroll_seed = random.randrange(1, 1 << 31)
+        self._sim_time = 0.0
+        self._walk_preview = True
+        self._refresh_anim_path()
+        self._update_pace_ui()
+        self._update_trail()
+        self._draw_pace_marker()
+        self._sync_immersive_side()
 
     def _on_period_slide(self, value: int) -> None:
         self.gps_period_sec = int(value)
@@ -864,6 +893,7 @@ class CampusNavApp(MapDrawingMixin):
 
     def _on_route_changed(self) -> None:
         self._stop_animation()
+        self._walk_preview = False
         self._sim_time = 0.0
         self._refresh_anim_path()
         self._update_pace_ui()
@@ -921,6 +951,9 @@ class CampusNavApp(MapDrawingMixin):
             self._stop_animation()
             self._update_pace_ui()
             return
+        if self._walk_preview:
+            self._walk_preview = False
+            self._sync_immersive_side()
         if self._sim_time >= self._anim_total_time - 1e-9:
             self._sim_time = 0.0
         self._playing = True
@@ -989,6 +1022,12 @@ class CampusNavApp(MapDrawingMixin):
         total_m = track[1] if track else None
         total_t = self._anim_total_time
         has_route = total_m is not None and self._anim_total > 0.0
+        can_walk = self.run is not None and self._anim_total > 0.0
+        self.walk_btn.configure(
+            state="normal" if can_walk else "disabled",
+            fg="#39414d" if can_walk else "#9aa5b4",
+            cursor="hand2" if can_walk else "arrow",
+        )
 
         if total_m is None:
             self.total_lbl.configure(text="No route", fg=C_MUTED)
@@ -1326,13 +1365,16 @@ class CampusNavApp(MapDrawingMixin):
 
         self._sync_immersive_mileage(run)
 
-        self.hint_lbl.configure(
-            text=("Click the map for the start · Wheel to zoom · "
-                  "Drag outside fence to pan"
-                  if run is None
-                  else "Press Play to run · Green line is the live trajectory · "
-                       "Wheel to zoom")
-        )
+        if self._walk_preview:
+            hint = ("Preview: a fresh walk path for the same checkpoints · "
+                    "Press Play to run it")
+        elif run is None:
+            hint = ("Click the map for the start · Wheel to zoom · "
+                    "Drag outside fence to pan")
+        else:
+            hint = ("Press Play to run · Green line is the live trajectory · "
+                    "Wheel to zoom")
+        self.hint_lbl.configure(text=hint)
 
     def _immersive_status(self, run: PointRun) -> str:
         gender = "Male" if self.gender == "male" else "Female"
