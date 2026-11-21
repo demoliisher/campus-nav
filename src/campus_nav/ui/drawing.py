@@ -83,6 +83,7 @@ class MapDrawingMixin:
             return
         c = self.canvas
         c.delete("all")
+        self._trail_items = None
         self._draw_fences()
         self._draw_areas()
         self._draw_roads()
@@ -270,22 +271,45 @@ class MapDrawingMixin:
         frac = min(1.0, max(0.0, self._sim_time / self._anim_total_time))
         return truncate_path(self._anim_pts, frac * self._anim_total)
 
+    def _update_trail(self) -> None:
+        """Grow the green trajectory in place; called every playback tick.
+
+        The trail is a single pair of canvas line items whose coordinates are
+        replaced as time advances, so playback never has to redraw the map.
+        """
+        c = self.canvas
+        trail = self._trail_points()
+        if len(trail) < 2:
+            for item in self._trail_items or ():
+                c.itemconfigure(item, state="hidden")
+            return
+        coords = self._flat(trail)
+        items = self._trail_items
+        if not items:
+            casing = c.create_line(
+                *coords, fill="#ffffff", width=self.pxf(9),
+                capstyle=tk.ROUND, joinstyle=tk.ROUND, tags="trail",
+            )
+            core = c.create_line(
+                *coords, fill=C_TRAIL, width=self.pxf(5),
+                capstyle=tk.ROUND, joinstyle=tk.ROUND, tags="trail",
+            )
+            self._trail_items = (casing, core)
+            if c.find_withtag("pace_arrow"):
+                c.tag_lower("trail", "pace_arrow")
+        else:
+            casing, core = items
+            c.coords(casing, *coords)
+            c.coords(core, *coords)
+            c.itemconfigure(casing, state="normal")
+            c.itemconfigure(core, state="normal")
+
     def _draw_immersive(self, run: PointRun) -> None:
         c = self.canvas
 
         # The planned route stays hidden; only the green live trajectory is
         # drawn, so the actual movement is easy to observe.
-        trail = self._trail_points()
-        if len(trail) >= 2:
-            coords = self._flat(trail)
-            c.create_line(
-                *coords, fill="#ffffff", width=self.pxf(9),
-                capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
-            c.create_line(
-                *coords, fill=C_TRAIL, width=self.pxf(5),
-                capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
+        self._update_trail()
 
         # Start point
         start = run.start_xy

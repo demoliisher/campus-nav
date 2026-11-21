@@ -100,6 +100,7 @@ class CampusNavApp(MapDrawingMixin):
         self._anim_cum: list[float] = []
         self._anim_total = 0.0
         self._anim_total_time = 0.0
+        self._trail_items: tuple[int, int] | None = None
 
         try:
             self.ui = max(0.75, min(2.5, root.winfo_fpixels("1i") / 96.0))
@@ -794,6 +795,7 @@ class CampusNavApp(MapDrawingMixin):
         self._refresh_anim_path()
         self._sim_time = frac * self._anim_total_time
         self._update_pace_ui()
+        self._update_trail()
         self._draw_pace_marker()
 
     def _stop_animation(self) -> None:
@@ -924,6 +926,7 @@ class CampusNavApp(MapDrawingMixin):
         self._playing = True
         self._last_tick = time.monotonic()
         self._update_pace_ui()
+        self._update_trail()
         self._draw_pace_marker()
         self._anim_after = self.root.after(33, self._tick)
 
@@ -943,10 +946,12 @@ class CampusNavApp(MapDrawingMixin):
                 # The next leg is attached: keep playing from the checkpoint.
                 self._last_tick = now
                 self._update_pace_ui()
+                self._update_trail()
                 self._draw_pace_marker()
                 self._anim_after = self.root.after(33, self._tick)
                 return
         self._update_pace_ui()
+        self._update_trail()
         self._draw_pace_marker()
         if self._sim_time >= self._anim_total_time - 1e-9:
             self._playing = False

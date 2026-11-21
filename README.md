@@ -221,5 +221,5 @@ uv run campus-nav --check
 
 `test_self_check_passes` in `uv run pytest` runs the same 52 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
-alignment, stroll-path bounds, arrow sampling, snap radius, geometry helpers,
-routing, and scoring-run behavior.
+alignment, stroll-path bounds, arrow sampling, snap radius, live-trail
+playback, geometry helpers, routing, and scoring-run behavior.
