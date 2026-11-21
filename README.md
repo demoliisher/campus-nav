@@ -63,14 +63,18 @@ The window has two modes.
   turn and `a + d` for a left turn, with `a` the half road width and `d` the
   lane offset), so the trail walks around the junction instead of cutting it;
   a checkpoint that requires doubling back is reached with a half-circle loop
-  rather than an acute angle. A **New walk** button next to Play plans all five
+  rather than an acute angle. The running track is special: it is drawn as the
+  middle lane, so the runner does not keep right there; each time they pass the
+  northernmost entrance they pick the inner or the outer lane at random, which
+  is visible on the cap laps. A **New walk** button next to Play plans all five
   checkpoints up front, re-rolls the wander for them and previews the complete
   path -- including the transit and track laps when the daily cap is on -- so
   several variants can be sampled quickly. Pressing Play then rewinds to the
   normal immersive reveal: the preview path is cleared, the unvisited
-  checkpoints are hidden again, and the run starts from the first checkpoint. The location interval (1-10 s) and maximum heading noise (0 to
-  +/-5 degrees) are adjustable. The full wander path is generated before
-  playback starts, so the arrow never pauses to search for the next target.
+  checkpoints are hidden again, and the run starts from the first checkpoint.
+  The location interval (1-10 s) and maximum heading noise (0 to +/-5 degrees)
+  are adjustable. The full wander path is generated before playback starts, so
+  the arrow never pauses to search for the next target.
 
 ### Both modes
 
@@ -225,12 +229,15 @@ uv run python scripts/build_gcj02_data.py
    swings wide). Smooth curves are left alone: their turn is spread over many
    vertices, and the lane offset follows them without an arc per vertex. Each
    location update advances by `speed x interval` meters with a bounded random
-   heading, and the offset stays in the right half of the 10 m road. Where the
-   route doubles back, a half circle joins the two lanes so the required
-   turn-around is a loop instead of an acute angle. Checkpoints are touched
-   exactly: the offset fades into the centerline approach, and a checkpoint
-   next to a corner is reached by a local smooth bend of the finished path.
-   The sequence is precomputed; the animation only interpolates it.
+   heading, and the offset stays in the right half of the 10 m road. On the
+   running track the lane is not fixed: the track is drawn as its middle lane,
+   so the path may run inside or outside, re-choosing at every passage of the
+   northernmost entrance (the decision point). Where the route doubles back, a
+   half circle joins the two lanes so the required turn-around is a loop
+   instead of an acute angle. Checkpoints are touched exactly: the offset fades
+   into the centerline approach, and a checkpoint next to a corner is reached
+   by a local smooth bend of the finished path. The sequence is precomputed;
+   the animation only interpolates it.
 
    The two corner cases, with `a` = half road width, `d` = lane offset and
    `J` = junction point: a right turn rounds the inside lane at `a - d`, while
@@ -251,7 +258,7 @@ uv run pytest
 uv run campus-nav --check
 ```
 
-`test_self_check_passes` in `uv run pytest` runs the same 56 checks as
+`test_self_check_passes` in `uv run pytest` runs the same 57 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
 alignment, stroll-path smoothness and bounds, arrow sampling, snap radius,
 live-trail playback, geometry helpers, routing, and scoring-run behavior.

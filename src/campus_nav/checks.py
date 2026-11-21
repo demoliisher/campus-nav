@@ -364,6 +364,10 @@ def run_check(cmap: CampusMap) -> bool:
           and abs(cap_preview.total_m - 8000.0) < 1.0
           and cap_preview.track_m > 0.0 and not cap_preview.finished,
           f"{cap_preview.total_m:.0f} m" if cap_preview else "no solution")
+    guide = cmap.track_lane_guide()
+    check("Running track has a lane guide",
+          guide is not None and len(guide[0]) >= 3 and guide[1] is not None,
+          f"{len(guide[0])} ring points" if guide else "no track")
 
     # 11) Only option: backtracking exclusion must fall back automatically.
     deg = [0] * len(cmap.coords)

@@ -180,3 +180,51 @@ def test_corner_after_a_turnaround_is_a_wide_smooth_arc():
     assert _worst_turn(points) < 50.0
     # A rounded turn keeps clear of the junction point.
     assert min(math.dist(p, (60.0, 0.0)) for p in points) > 2.5
+
+
+def _circle_ring(n=36, r=60.0):
+    return [(r * math.cos(2.0 * math.pi * i / n),
+             r * math.sin(2.0 * math.pi * i / n)) for i in range(n)]
+
+
+def test_track_lanes_switch_between_inner_and_outer():
+    # The track is drawn as its middle lane and does not keep right: the
+    # stroll picks the inner or outer lane, re-rolling at the northern
+    # entrance on every lap.
+    ring = _circle_ring()
+    route = list(ring) + list(ring) + [ring[0]]
+    north = max(ring, key=lambda p: p[1])
+    used_inner = False
+    used_outer_only = False
+    for seed in range(1, 9):
+        path = build_stroll_path(
+            route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=seed,
+            track_ring=ring, track_decision=north,
+        )
+        points = list(path.points)[1:-1]
+        assert all(abs(math.hypot(*p) - 60.0) < 5.0 for p in points)
+        inner = sum(1 for p in points if math.hypot(*p) < 59.5)
+        used_inner = used_inner or inner > 0
+        used_outer_only = used_outer_only or inner == 0
+    assert used_inner, "the inner lane is used at least once"
+    assert used_outer_only, "the outer lane is still used"
+    # Without the guide the runner keeps right, i.e. always outside the ring.
+    plain = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+    )
+    assert all(math.hypot(*p) >= 60.0 - 1e-6
+               for p in list(plain.points)[1:-1])
+
+
+def test_track_guide_does_not_touch_other_roads():
+    ring = _circle_ring()
+    north = max(ring, key=lambda p: p[1])
+    route = [(500.0, 0.0), (600.0, 0.0)]
+    plain = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+    )
+    guided = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+        track_ring=ring, track_decision=north,
+    )
+    assert plain.points == guided.points

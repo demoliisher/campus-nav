@@ -487,6 +487,26 @@ class CampusMap:
                 out.append(nid)
         return out
 
+    def track_lane_guide(self):
+        """Running track geometry for the stroll: (ring, northernmost entrance).
+
+        The ring is the track centerline drawn as the middle lane; the
+        northernmost entrance is the point where the stroll re-chooses between
+        the inner and outer lane each time the runner passes it.
+        """
+        track = next(
+            (a for a in self.areas
+             if a.desc == "Running Track" and a.kind == "ring"),
+            None,
+        )
+        if track is None or len(track.ring_xy) < 3:
+            return None
+        access = self._track_access_nodes(track)
+        if not access:
+            return None
+        north = max(access, key=lambda nid: self.coords[nid][1])
+        return list(track.ring_xy), self.coords[north]
+
     def _track_loop_path(self, track: Area, access_node: int,
                          distance: float) -> list[tuple[float, float]]:
         """Run counterclockwise from a track entrance for distance meters (multiple laps allowed)."""

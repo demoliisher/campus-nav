@@ -51,6 +51,7 @@ class CampusNavApp(MapDrawingMixin):
                  fences: list[Fence] | None = None):
         self.root = root
         self.cmap = cmap
+        self._track_guide = cmap.track_lane_guide()
         self.fences = list(fences or [])
         self._fence_rings_xy = [
             [self.cmap.proj.xy(lon, lat) for lon, lat in ring]
@@ -893,6 +894,7 @@ class CampusNavApp(MapDrawingMixin):
             anchors = list(run.points_xy)
             if run.start_xy is not None:
                 anchors.append(run.start_xy)
+            guide = self._track_guide
             stroll = build_stroll_path(
                 clean,
                 pace_sec=self.pace_seconds,
@@ -900,6 +902,8 @@ class CampusNavApp(MapDrawingMixin):
                 max_deg=self.heading_max_deg,
                 seed=self._stroll_seed,
                 anchors=anchors,
+                track_ring=guide[0] if guide else (),
+                track_decision=guide[1] if guide else None,
             )
             clean = list(stroll.points)
         self._anim_pts = clean
