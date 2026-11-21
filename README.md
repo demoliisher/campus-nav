@@ -65,10 +65,10 @@ The window has two modes.
   a checkpoint that requires doubling back is reached with a half-circle loop
   rather than an acute angle. A **New walk** button next to Play plans all five
   checkpoints up front, re-rolls the wander for them and previews the complete
-  path, which makes it easy to sample several variants quickly. Pressing Play
-  then rewinds to the normal immersive reveal: the preview path is cleared, the
-  unvisited checkpoints are hidden again, and the run starts from the first
-  checkpoint. The location interval (1-10 s) and maximum heading noise (0 to
+  path -- including the transit and track laps when the daily cap is on -- so
+  several variants can be sampled quickly. Pressing Play then rewinds to the
+  normal immersive reveal: the preview path is cleared, the unvisited
+  checkpoints are hidden again, and the run starts from the first checkpoint. The location interval (1-10 s) and maximum heading noise (0 to
   +/-5 degrees) are adjustable. The full wander path is generated before
   playback starts, so the arrow never pauses to search for the next target.
 
@@ -251,7 +251,7 @@ uv run pytest
 uv run campus-nav --check
 ```
 
-`test_self_check_passes` in `uv run pytest` runs the same 55 checks as
+`test_self_check_passes` in `uv run pytest` runs the same 56 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
 alignment, stroll-path smoothness and bounds, arrow sampling, snap radius,
 live-trail playback, geometry helpers, routing, and scoring-run behavior.

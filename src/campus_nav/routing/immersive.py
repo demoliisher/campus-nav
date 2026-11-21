@@ -125,10 +125,23 @@ class ImmersiveSession:
         return self.run
 
     def full_snapshot(self) -> PointRun | None:
-        """All planned checkpoints and legs, without changing the reveal state."""
+        """All planned checkpoints and legs, without changing the reveal state.
+
+        The daily-cap extension (track transit plus laps) is included when the
+        cap is enabled, so a preview can show the complete run.
+        """
         if self.run is None:
             return None
-        return self._snapshot(revealed=self.n, completed=0, finished=False)
+        return self._snapshot(revealed=self.n, completed=0, finished=False,
+                              with_cap=True)
+
+    def refresh_cap(self) -> PointRun | None:
+        """Recompute the cap extension after the cap or gender setting changes."""
+        if self.run is None:
+            return None
+        self._cap = self._plan_cap()
+        self.run = self._snapshot()
+        return self.run
 
     # ---- Internal --------------------------------------------------------
     def _new_point(self, exclude) -> tuple[float, float] | None:
@@ -170,11 +183,13 @@ class ImmersiveSession:
 
     def _snapshot(self, revealed: int | None = None,
                   completed: int | None = None,
-                  finished: bool | None = None) -> PointRun:
+                  finished: bool | None = None,
+                  with_cap: bool | None = None) -> PointRun:
         revealed = (self._revealed if revealed is None
                     else max(1, min(self.n, int(revealed))))
         completed = self._completed if completed is None else int(completed)
         finished = self._finished if finished is None else bool(finished)
+        include_cap = finished if with_cap is None else bool(with_cap)
         legs = self._legs[:revealed]
         path: list[tuple[float, float]] = (
             [self._start_xy] if self._start_xy is not None else []
@@ -183,7 +198,7 @@ class ImmersiveSession:
         for leg, leg_areas in zip(legs, self._leg_areas[:revealed]):
             append_path(path, leg.path)
             areas.update(leg_areas)
-        extension = self._cap if finished else None
+        extension = self._cap if include_cap else None
         if extension is not None:
             append_path(path, extension.path)
             areas.update(extension.areas_used)

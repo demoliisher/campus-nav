@@ -790,19 +790,27 @@ class CampusNavApp(MapDrawingMixin):
         self._rebuild_anim_keep_position()
 
     def _on_new_walk(self) -> None:
-        """Re-roll the walk for the same run and preview all five checkpoints."""
+        """Re-roll the walk for the same run and preview the complete path."""
         if self.mode != "immersive" or self.run is None:
             return
         if self.immersive_session is None:
-            return
-        full = self.immersive_session.full_snapshot()
-        if full is None:
             return
         if not self.stroll.get():
             self.stroll.set(True)
             self._sync_stroll_controls()
         self._stop_animation()
         self._stroll_seed = random.randrange(1, 1 << 31)
+        self._apply_preview()
+        self._sync_side()
+        self._redraw()
+
+    def _apply_preview(self) -> None:
+        """Refresh the preview run and its walk path from the session plan."""
+        if self.immersive_session is None:
+            return
+        full = self.immersive_session.full_snapshot()
+        if full is None:
+            return
         self._preview_run = full
         self._walk_preview = True
         self._sim_time = 0.0
@@ -810,8 +818,6 @@ class CampusNavApp(MapDrawingMixin):
         self._update_pace_ui()
         self._update_trail()
         self._draw_pace_marker()
-        self._sync_side()
-        self._redraw()
 
     def _on_period_slide(self, value: int) -> None:
         self.gps_period_sec = int(value)
@@ -1061,7 +1067,11 @@ class CampusNavApp(MapDrawingMixin):
                 text=f"{len(self._preview_run.points_xy)} checkpoints · "
                      f"Total {fmt_len(total_m)}"
             )
-            self.pace_dist_lbl.configure(text="All five checkpoints")
+            self.pace_dist_lbl.configure(
+                text="Five checkpoints + cap"
+                if self._preview_run.limit_state in ("transit", "track")
+                else "All five checkpoints"
+            )
             self.pace_time_lbl.configure(text=fmt_duration(total_t))
             self._draw_pace_bar(0.0)
             self.play_btn.configure(
@@ -1396,7 +1406,9 @@ class CampusNavApp(MapDrawingMixin):
                 C_STATUS_FG,
             )
         elif self._walk_preview:
-            status = (f"Preview: {len(run.points_xy)} checkpoints, "
+            extra = (" + track cap" if run.limit_state in ("transit", "track")
+                     else "")
+            status = (f"Preview: {len(run.points_xy)} checkpoints{extra}, "
                       f"{fmt_len(run.total_m)} total. Press Play to run them "
                       f"one by one.")
             color = C_STATUS_FG
@@ -1543,6 +1555,7 @@ class CampusNavApp(MapDrawingMixin):
             return
         if self.immersive_session is not None:
             self.immersive_session.daily_cap_m = self._daily_cap_m()
+            self._refresh_cap_state()
         self._sync_side()
 
     def _on_run_limit_toggle(self) -> None:
@@ -1551,4 +1564,18 @@ class CampusNavApp(MapDrawingMixin):
         if self.immersive_session is not None:
             self.immersive_session.run_limit = self.run_limit.get()
             self.immersive_session.daily_cap_m = self._daily_cap_m()
+            self._refresh_cap_state()
         self._sync_side()
+
+    def _refresh_cap_state(self) -> None:
+        """Recompute the cap extension and refresh the preview or played path."""
+        if self.immersive_session is None:
+            return
+        updated = self.immersive_session.refresh_cap()
+        if updated is not None:
+            self.run = updated
+        if self._walk_preview:
+            self._apply_preview()
+        else:
+            self._rebuild_anim_keep_position()
+        self._redraw()

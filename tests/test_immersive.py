@@ -83,6 +83,24 @@ def test_full_snapshot_plans_five_and_keeps_the_reveal(cmap, start_xy):
     assert not rewound.finished
 
 
+def test_full_snapshot_includes_the_cap_laps(cmap, start_xy):
+    session = ImmersiveSession(
+        cmap, run_limit=True, daily_cap_m=8000.0,
+        rng=random.Random(20261120),
+    )
+    run = session.start(start_xy)
+    assert run is not None
+    full = session.full_snapshot()
+    assert full is not None
+    assert len(full.points_xy) == 5
+    assert full.limit_state == "track"
+    assert full.track_m > 0.0
+    assert full.total_m == pytest.approx(8000.0, abs=1.0)
+    assert full.total_m == pytest.approx(_path_len(full.path), abs=1e-6)
+    assert not full.finished
+    assert full.total_m > run.total_m
+
+
 def test_checkpoints_on_roads_and_separated(cmap, start_xy):
     session = ImmersiveSession(
         cmap, min_sep_m=60.0, rng=random.Random(20261120)

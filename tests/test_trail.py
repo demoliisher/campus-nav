@@ -123,6 +123,15 @@ def test_new_walk_rerolls_and_previews_the_same_checkpoints(app, cmap):
     assert app._anim_pts != second
     assert len(app._preview_run.points_xy) == 5
 
+    # Turning the daily cap on adds the track transit and laps to the preview.
+    app.run_limit.set(True)
+    app._on_run_limit_toggle()
+    assert app._walk_preview
+    assert app._preview_run.limit_state in ("transit", "track")
+    assert app._preview_run.transit_m + app._preview_run.track_m > 0.0
+    assert app._preview_run.total_m == pytest.approx(8000.0, abs=1.0)
+    assert app._anim_total > 5000.0
+
     # Play rewinds to the immersive reveal and starts from the beginning.
     app._toggle_play()
     assert not app._walk_preview

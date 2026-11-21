@@ -358,6 +358,12 @@ def run_check(cmap: CampusMap) -> bool:
           cir is not None and cir.finished and cir.limit_state == "track"
           and abs(cir.total_m - 8000.0) < 1.0,
           f"{cir.total_m:.0f} m" if cir else "no solution")
+    cap_preview = cap_immersive.full_snapshot()
+    check("Immersive preview includes the track cap",
+          cap_preview is not None and cap_preview.limit_state == "track"
+          and abs(cap_preview.total_m - 8000.0) < 1.0
+          and cap_preview.track_m > 0.0 and not cap_preview.finished,
+          f"{cap_preview.total_m:.0f} m" if cap_preview else "no solution")
 
     # 11) Only option: backtracking exclusion must fall back automatically.
     deg = [0] * len(cmap.coords)
