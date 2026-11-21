@@ -44,9 +44,9 @@ The window has two modes.
   real-time trajectory actually covered; the moving pace arrow marks the
   current position.
 - **Gate roads**: features carrying `random_exclude: true` are never used when
-  checkpoints are generated, so the simulated run keeps off the three roads
-  leading to the campus gates. Picking those roads by hand in route planning
-  still works.
+  checkpoints are generated. Only the gate-side stretch is marked: the road
+  from West Gate 2 is split at West Avenue, so its inner half stays eligible.
+  Picking any road by hand in route planning still works.
 - **Pace**: a slider from 0'05'' to 10'00'' per kilometer (default 5'00'').
   Press Play/Pause; the large readout is the **distance already walked from the
   start**, while the small line keeps the total.
@@ -179,7 +179,7 @@ package. Use `--map` / `--fence` to point at other files. Coordinates are
 | `desc` | Road/area display name, used in the sidebar and road labels |
 | `traverse` | `area` = freely traversable interior; `ring` = boundary only; `fence` = display-only fence |
 | `run_direction` | `ccw` / `cw`, only for `ring`, sets the one-way direction |
-| `random_exclude` | `true` = excluded from generated checkpoints (the gate roads) |
+| `random_exclude` | `true` = excluded from generated checkpoints (gate-side stretches) |
 
 Source data is kept under `data/`: roads are WGS-84 (`map_wgs84.geojson`) and
 the server fence is exported from its `lat/lng` fields as BD-09

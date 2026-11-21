@@ -139,3 +139,14 @@ def test_generated_runs_avoid_gate_roads(cmap):
         for xy in run.points_xy:
             proj = cmap.nearest_projection(*xy)
             assert cmap.edges[proj.edge_id].feature_id not in excluded
+
+
+def test_gate_road_split_keeps_the_inner_stretch_eligible(cmap):
+    by_desc = {f["properties"]["desc"]: f for f in cmap.features}
+    gate_side = by_desc["Campus Road - West Gate 2 to West Avenue"]
+    inner = by_desc["Campus Road - West Avenue to Plaza"]
+
+    assert gate_side["properties"]["random_exclude"] is True
+    assert not inner["properties"].get("random_exclude")
+    # The split must not break the road: both halves share the junction vertex.
+    assert gate_side["geometry"]["coordinates"][-1] == inner["geometry"]["coordinates"][0]
