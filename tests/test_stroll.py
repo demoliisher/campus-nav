@@ -187,28 +187,39 @@ def _circle_ring(n=36, r=60.0):
              r * math.sin(2.0 * math.pi * i / n)) for i in range(n)]
 
 
-def test_track_lanes_switch_between_inner_and_outer():
-    # The track is drawn as its middle lane and does not keep right: the
-    # stroll picks the inner or outer lane, re-rolling at the northern
-    # entrance on every lap.
+def test_track_uses_the_eight_standard_lanes():
+    # A standard 400 m track is eight lanes of 1.22 m: lane centres lie 0.61,
+    # 1.83, 3.05 and 4.27 m either side of the drawn centerline. The stroll
+    # must pick one of those per passage of the northern entrance, not merely
+    # the inner or the outer lane, and stay inside the chosen lane.
     ring = _circle_ring()
     route = list(ring) + list(ring) + [ring[0]]
     north = max(ring, key=lambda p: p[1])
-    used_inner = False
-    used_outer_only = False
+    centres = [60.0 + sign * (0.61 + 1.22 * k)
+               for k in range(4) for sign in (-1.0, 1.0)]
+    used = set()
     for seed in range(1, 9):
         path = build_stroll_path(
             route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=seed,
             track_ring=ring, track_decision=north,
         )
         points = list(path.points)[1:-1]
-        assert all(abs(math.hypot(*p) - 60.0) < 5.0 for p in points)
-        inner = sum(1 for p in points if math.hypot(*p) < 59.5)
-        used_inner = used_inner or inner > 0
-        used_outer_only = used_outer_only or inner == 0
-    assert used_inner, "the inner lane is used at least once"
-    assert used_outer_only, "the outer lane is still used"
-    # Without the guide the runner keeps right, i.e. always outside the ring.
+        assert all(abs(math.hypot(*p) - 60.0) <= 5.0 for p in points)
+        in_lane = 0
+        for p in points:
+            radius = math.hypot(*p)
+            centre = min(centres, key=lambda c: abs(c - radius))
+            # Lane changes are the only points away from a lane centre.
+            assert abs(centre - radius) <= 1.1
+            if abs(centre - radius) <= 0.55:
+                in_lane += 1
+                used.add(round(centre, 2))
+        assert in_lane >= 0.9 * len(points)
+    # All eight lanes show up across the sampled walks, evenly spaced.
+    assert len(used) == 8
+    gaps = [round(b - a, 2) for a, b in zip(sorted(used), sorted(used)[1:])]
+    assert all(abs(gap - 1.22) < 0.01 for gap in gaps)
+    # Without the guide the runner keeps right, i.e., always outside the ring.
     plain = build_stroll_path(
         route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
     )

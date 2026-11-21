@@ -63,10 +63,13 @@ The window has two modes.
   turn and `a + d` for a left turn, with `a` the half road width and `d` the
   lane offset), so the trail walks around the junction instead of cutting it;
   a checkpoint that requires doubling back is reached with a half-circle loop
-  rather than an acute angle. The running track is special: it is drawn as the
-  middle lane, so the runner does not keep right there; each time they pass the
-  northernmost entrance they pick the inner or the outer lane at random, which
-  is visible on the cap laps. A **New walk** button next to Play plans all five
+  rather than an acute angle. The running track is special: it is not a
+  right-hand road but a standard eight-lane track. Fitting the standard 1.22 m
+  lanes into the same 10 m width puts their centres 0.61, 1.83, 3.05 and 4.27 m
+  either side of the centerline; lane 1 is the 400 m lane and each lane
+  outward is about 7 m longer per lap. Each time the runner passes the
+  northernmost entrance they pick one of the eight lanes at random and keep
+  to it, so the cap laps use the whole lane band. A **New walk** button next to Play plans all five
   checkpoints up front, re-rolls the wander for them and previews the complete
   path -- including the transit and track laps when the daily cap is on -- so
   several variants can be sampled quickly. Pressing Play then rewinds to the
@@ -230,9 +233,11 @@ uv run python scripts/build_gcj02_data.py
    vertices, and the lane offset follows them without an arc per vertex. Each
    location update advances by `speed x interval` meters with a bounded random
    heading, and the offset stays in the right half of the 10 m road. On the
-   running track the lane is not fixed: the track is drawn as its middle lane,
-   so the path may run inside or outside, re-choosing at every passage of the
-   northernmost entrance (the decision point). Where the route doubles back, a
+   running track the lane rule is different: it is a standard eight-lane track
+   drawn inside the 10 m width, with lane centres 1.22 m apart. Each passage of
+   the northernmost entrance (the decision point) picks one of the eight lanes,
+   and the wander stays inside that lane instead of spanning the road. Where
+   the route doubles back, a
    half circle joins the two lanes so the required turn-around is a loop
    instead of an acute angle. Checkpoints are touched exactly: the offset fades
    into the centerline approach, and a checkpoint next to a corner is reached

@@ -4,9 +4,9 @@
 The planned route is treated as a road centerline. The generated path keeps to
 the right of that centerline, wanders with a bounded heading noise, and is
 precomputed so playback never has to stop and search for the next target. The
-running track is the exception: it is drawn as its middle lane, so the path
-uses the inner or the outer lane there and re-chooses at every passage of the
-northernmost entrance.
+running track is the exception: it is not a right-hand road but eight standard
+lanes, so each passage of the northernmost entrance picks one of the eight
+lanes (1.22 m apart) and the wander stays inside that lane.
 
 Geometry notes:
 
@@ -60,7 +60,10 @@ ARC_STEP_M = 0.4
 NOISE_MAX_M = 1.6
 TRACK_TOL_M = 1.2                          # centerline this close is on the track
 TRACK_DECISION_TOL_M = 2.5                 # passage of the northern entrance
-TRACK_SIDE_RAMP_M = 8.0                    # lane change after a track decision
+TRACK_LANE_COUNT = 8                       # standard 400 m track: eight lanes
+TRACK_LANE_WIDTH_M = 1.22                  # standard lane width (9.76 m band)
+TRACK_LANE_RAMP_M = 15.0                   # lane change after a track decision
+TRACK_LANE_NOISE = 0.25                    # keep the wander inside one lane
 
 
 @dataclass(frozen=True)
@@ -396,15 +399,39 @@ def _compact_controls(controls) -> list[tuple[float, float]]:
     return out
 
 
+def _track_inner_sign(center: _Centerline, ring, station: float) -> float:
+    """+1 when the runner's right-hand side points into the track infield."""
+    _, tangent = center.at(min(center.total, station + 0.5))
+    p, _ = center.at(station)
+    probe = (p[0] + tangent[1] * 1.5, p[1] - tangent[0] * 1.5)
+    return 1.0 if point_in_polygon(probe[0], probe[1], ring) else -1.0
+
+
+def _track_lane_offset(index: int, inner_sign: float, lat_max: float) -> float:
+    """Signed lane offset for a standard track lane, counted from the infield.
+
+    Lane 1 is the innermost: a standard 400 m track has eight 1.22 m lanes, so
+    their centres lie 0.61, 1.83, ..., 9.15 m out from the inner edge. The
+    band is 9.76 m wide and fits inside the 10 m track; dividing the width
+    evenly keeps every lane 1.22 m from its neighbours and each lap about
+    7 m longer than the previous one. The result is clamped to the walkable
+    margin in case a caller uses a narrower road width.
+    """
+    half_band = TRACK_LANE_COUNT * TRACK_LANE_WIDTH_M / 2.0
+    centre = (index - 0.5) * TRACK_LANE_WIDTH_M
+    value = inner_sign * (half_band - centre)
+    return max(-lat_max, min(lat_max, value))
+
+
 def _track_lane_zones(center: _Centerline, ring, decision, preferred: float,
-                      corners, seed: int):
+                      lat_max: float, corners, seed: int):
     """Signed lane targets for the running track.
 
-    The track is drawn as its middle lane, so the stroll does not keep right
-    there. Each time the runner passes the northernmost entrance it randomly
-    switches between the inner and the outer lane; the swap ramps over a few
-    meters after the decision point. Returns ``[(s_start, s_end, controls)]``
-    and leaves the lane to the normal rules outside these zones.
+    The track is not a right-hand road: it is a standard eight-lane track. The
+    runner enters in the ordinary right-side lane, then each time they pass
+    the northernmost entrance they pick one of the eight lanes and the swap
+    ramps over a few meters. Returns ``[(s_start, s_end, controls)]`` and
+    leaves the lane to the normal rules outside these zones.
     """
     if not ring or decision is None or len(ring) < 3:
         return []
@@ -455,24 +482,27 @@ def _track_lane_zones(center: _Centerline, ring, decision, preferred: float,
                     decisions.append(s)
                 last_hit = s
             s += step
-        bounds = [start] + decisions + [end]
-        controls: list[tuple[float, float]] = []
-        prev = _lane_target(start, corners, preferred)
-        for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
-            _, tangent = center.at(min(end, a + 0.5))
-            p, _ = center.at(a)
-            probe = (p[0] + tangent[1] * 1.5, p[1] - tangent[0] * 1.5)
-            inner_sign = (1.0 if point_in_polygon(probe[0], probe[1], ring)
-                          else -1.0)
-            value = (inner_sign if rng.random() < 0.5 else -inner_sign) * preferred
-            controls.append((a, prev))
-            controls.append((min(b, a + TRACK_SIDE_RAMP_M), value))
-            if k == len(bounds) - 2:
-                controls.append((b, value))
-                controls.append(
-                    (min(center.total, b + TRACK_SIDE_RAMP_M), preferred)
-                )
+        # Enter in the normal lane, pick a track lane straight away, then
+        # re-pick once per passage of the northern entrance.
+        inner_sign = _track_inner_sign(center, ring, start)
+        entry = _track_lane_offset(rng.randint(1, TRACK_LANE_COUNT),
+                                   inner_sign, lat_max)
+        controls: list[tuple[float, float]] = [
+            (start, _lane_target(start, corners, preferred)),
+            (min(end, start + TRACK_LANE_RAMP_M), entry),
+        ]
+        prev = entry
+        for station in decisions:
+            inner_sign = _track_inner_sign(center, ring, station)
+            value = _track_lane_offset(rng.randint(1, TRACK_LANE_COUNT),
+                                       inner_sign, lat_max)
+            controls.append((station, prev))
+            controls.append((min(end, station + TRACK_LANE_RAMP_M), value))
             prev = value
+        controls.append((end, prev))
+        controls.append(
+            (min(center.total, end + TRACK_LANE_RAMP_M), preferred)
+        )
         controls = _compact_controls(controls)
         zones.append((controls[0][0], controls[-1][0],
                       [c[0] for c in controls], controls))
@@ -574,7 +604,7 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
     pin_targets = _pin_targets(center, anchors, reversals)
     corners = _build_corners(center, turns, reversals, half, preferred)
     track_zones = _track_lane_zones(center, track_ring, track_decision,
-                                    preferred, corners, seed)
+                                    preferred, lat_max, corners, seed)
     # Checkpoints that sit on or next to a corner arc are reached by a local
     # bend afterwards; fading the lane there would fight the arc.
     near_corner = [s for s, _p in pin_targets
@@ -662,7 +692,12 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
         track_lane = _track_lane_value(s2, track_zones)
         base = (_lane_target(s2, corners, preferred)
                 if track_lane is None else track_lane)
-        lane = base + dev * _noise_scale(s2, corners)
+        # On the track the runner keeps to the chosen lane; a full road-width
+        # wander would smear several lanes into one band.
+        noise = _noise_scale(s2, corners)
+        if track_lane is not None:
+            noise *= TRACK_LANE_NOISE
+        lane = base + dev * noise
         lane = max(-lat_max, min(lat_max, lane))
         lane *= _anchor_factor(s2, anchor_s)
         push(_offset_point(center, s2, lane, reversals), s2)

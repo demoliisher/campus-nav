@@ -490,9 +490,9 @@ class CampusMap:
     def track_lane_guide(self):
         """Running track geometry for the stroll: (ring, northernmost entrance).
 
-        The ring is the track centerline drawn as the middle lane; the
-        northernmost entrance is the point where the stroll re-chooses between
-        the inner and outer lane each time the runner passes it.
+        The ring is the track centerline. The northernmost entrance is the
+        point where the stroll picks one of the eight standard lanes each
+        time the runner passes it.
         """
         track = next(
             (a for a in self.areas
