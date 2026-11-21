@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "campus-nav"
-version = "1.7.1"
+version = "1.9.0"
 source = { editable = "." }
 
 [package.dev-dependencies]

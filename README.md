@@ -210,18 +210,29 @@ uv run python scripts/build_gcj02_data.py
    point: route to the track, then continue along the counterclockwise
    boundary for the remaining distance (multiple laps are allowed) and
    truncate the final path by length.
-7. Stroll playback treats the planned route as a centerline. Each leg between
-   U-turns is resampled and smoothed into a curve, so corners become wide arcs
-   (about 6 m radius) and the path never steps on the raw GeoJSON vertices; the
-   ends of a leg are left untouched so a turn-around still meets the road
-   squarely. Each location update advances by `speed x interval` meters with a
-   bounded random heading; the offset stays in the right half of the 10 m road,
-   is capped on the inside of a turn in proportion to the local corner radius
-   (which keeps the trail from folding back on itself), and returns to the
-   centerline at checkpoints, whose positions are pinned back onto the curve
-   after smoothing. Where the route doubles back, a half circle joins the two
-   lanes so the required turn-around is a loop instead of an acute angle. The
-   sequence is precomputed; the animation only interpolates it.
+7. Stroll playback treats the planned route as a centerline. The route is
+   first simplified (0.4 m tolerance) so polyline jitter is not mistaken for a
+   bend, then every corner is replaced by a circular arc tangent to the right
+   lane before and after it. The arc centre is the vertex of the road-width
+   square on the inside of the turn: with half width `a` and lane offset `d`
+   the radius is `a - d` for a right turn (the runner is on the inside lane)
+   and `a + d` for a left turn (the runner stays on the outside lane and
+   swings wide). Smooth curves are left alone: their turn is spread over many
+   vertices, and the lane offset follows them without an arc per vertex. Each
+   location update advances by `speed x interval` meters with a bounded random
+   heading, and the offset stays in the right half of the 10 m road. Where the
+   route doubles back, a half circle joins the two lanes so the required
+   turn-around is a loop instead of an acute angle. Checkpoints are touched
+   exactly: the offset fades into the centerline approach, and a checkpoint
+   next to a corner is reached by a local smooth bend of the finished path.
+   The sequence is precomputed; the animation only interpolates it.
+
+   The two corner cases, with `a` = half road width, `d` = lane offset and
+   `J` = junction point: a right turn rounds the inside lane at `a - d`, while
+   a left turn stays on the outside lane and sweeps at `a + d`.
+
+   ![Corner arcs](docs/corner-arcs.png)
+
 8. Route-planning direction arrows are sampled every N meters along the
    planned polyline, taking the unit tangent of the segment they fall on. The
    sampler is independent of the graph, so arrow density can change without

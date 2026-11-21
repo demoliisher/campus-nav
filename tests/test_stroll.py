@@ -115,27 +115,37 @@ def test_stroll_path_is_precomputed():
     # interpolates it and never asks for a new target.
     assert isinstance(path.points, tuple)
     assert len(path.points) > 2
-def test_corner_is_rounded_and_avoids_the_raw_vertex():
+
+
+def test_left_corner_is_a_tangent_arc_on_the_right_lane():
+    # A left turn keeps the runner on the right (outside) lane, so its arc
+    # radius is a + d and it sweeps through the junction area. What matters is
+    # that it is one smooth tangent arc instead of the old pigtail, and that
+    # it never crosses to the far lane.
     route = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
     path = build_stroll_path(
         route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
     )
     points = list(path.points)
-    # No spike: the turn is spread over several samples.
     assert _worst_turn(points) < 50.0
-    # The path does not step on the GeoJSON vertex itself; it may pass near it
-    # only as part of a wide arc around the corner.
-    assert min(math.dist(p, route[1]) for p in points) > 0.5
+    approach = [p for p in points if p[0] < 90.0]
+    departure = [p for p in points if p[1] > 95.0]
+    assert approach and all(p[1] <= 1e-9 for p in approach)
+    assert departure and all(p[0] >= 100.0 - 1e-9 for p in departure)
+    # The path does not step on the GeoJSON vertex itself.
+    assert min(math.dist(p, route[1]) for p in points) > 0.3
 
 
-def test_inside_corner_is_cut_instead_of_folding():
+def test_right_corner_arc_keeps_clear_of_the_junction():
     route = [(0.0, 0.0), (100.0, 0.0), (100.0, -100.0)]
     path = build_stroll_path(
         route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
     )
     points = list(path.points)
     assert _worst_turn(points) < 50.0
-    assert min(math.dist(p, route[1]) for p in points) > 0.5
+    # Right turn: the runner is on the inside lane, radius a - d, so the arc
+    # keeps a full road width away from the junction.
+    assert min(math.dist(p, route[1]) for p in points) > 4.0
 
 
 def test_u_turn_is_a_loop_not_an_acute_angle():

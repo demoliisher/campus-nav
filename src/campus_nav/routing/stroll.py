@@ -2,23 +2,30 @@
 """Stroll path generation for scoring-run playback.
 
 The planned route is treated as a road centerline. The generated path keeps to
-the right of that centerline inside a 10 m road width, wanders with a bounded
-heading noise, and is precomputed so playback never has to stop and search for
-the next target.
+the right of that centerline, wanders with a bounded heading noise, and is
+precomputed so playback never has to stop and search for the next target.
 
 Geometry notes:
 
-* The centerline tangent is a central difference over a short window, so it is
-  continuous through polyline vertices; the path rounds corners instead of
-  stepping on the raw GeoJSON points.
-* Every location update still advances by ``speed x interval`` meters, but the
-  curve is sampled densely and then simplified, so corners are drawn as curves
-  while straights keep few points.
-* On the inside of a turn the lateral offset is capped, which cuts the corner
-  and avoids the cusp an offset curve would otherwise create.
+* Every corner is replaced by a circular arc that is tangent to the lane before
+  and after it. The arc centre is the vertex of the road-width square on the
+  inside of the turn, so the runner walks *around* the corner instead of
+  cutting it. With half width ``a`` and lane offset ``d`` the radius is
+  ``a - d`` for a right turn and ``a + d`` for a left turn: a right turn keeps
+  the runner on the inside lane, a left turn carries them on the outside lane,
+  which swings wide around the junction.
+* A corner is any vertex of any LineString, so bends inside one road feature
+  are treated exactly like junctions between two features. Smooth curves are
+  not corners: their turn is spread over many vertices, and the lane offset
+  follows them without one arc per vertex.
 * Where the route doubles back (a checkpoint that requires a U-turn) the two
   lanes are joined by a half circle, so the turn-around is a loop rather than
   an acute angle.
+* Checkpoints are touched exactly; a checkpoint next to a corner is reached by
+  a local smooth bend of the finished path.
+* Every location update still advances by ``speed x interval`` meters, but the
+  curve is sampled densely and then simplified, so corners are drawn as curves
+  while straights keep few points.
 """
 
 from __future__ import annotations
@@ -34,17 +41,18 @@ RIGHT_PREFERRED_M = 2.5
 EDGE_MARGIN_M = 0.25
 
 REVERSAL_ANGLE_RAD = math.radians(150.0)   # treated as a U-turn
-INSIDE_RADIUS_FRACTION = 0.5               # keep this share of the corner radius
-MIN_INSIDE_M = 0.35
-CAP_MIN_WINDOW_M = 4.0                     # widen the low-cap zone around a corner
-CAP_SMOOTH_WINDOW_M = 3.0                  # and blend its shoulders
+CORNER_MIN_ANGLE_RAD = math.radians(25.0)  # smaller bends are map jitter
+SHARP_CORNER_RAD = math.radians(40.0)      # always rounded
+CORNER_PEAK_RATIO = 1.6                    # a corner stands out from its bends
+MIN_TURN_RADIUS_M = 0.75                   # arc radius floor at sharp corners
 ANCHOR_ZONE_M = 4.0
 REVERSAL_ZONE_M = 6.0
 TANGENT_WINDOW_M = 0.8
-CENTER_SMOOTH_M = 6.0                      # corner rounding radius of the centerline
 SAMPLE_M = 0.5
 SIMPLIFY_M = 0.08
+CENTER_SIMPLIFY_M = 0.4                    # drop map polyline jitter first
 ARC_STEP_M = 0.4
+NOISE_MAX_M = 1.6
 
 
 @dataclass(frozen=True)
@@ -59,6 +67,16 @@ class StrollPath:
     reversals: int = 0
 
 
+@dataclass(frozen=True)
+class _Corner:
+    """One rounded corner of the route."""
+
+    s_in: float                                   # station of the arc start
+    s_out: float                                  # station of the arc end
+    lane: float                                   # lane offset of the arc
+    points: tuple[tuple[float, float], ...]       # P ... Q
+
+
 def _dedupe(points) -> list[tuple[float, float]]:
     out: list[tuple[float, float]] = []
     for p in points:
@@ -68,117 +86,23 @@ def _dedupe(points) -> list[tuple[float, float]]:
     return out
 
 
-def _pin_points(points: list[tuple[float, float]], targets, half: int,
-                max_pull: float = 3.0) -> list[tuple[float, float]]:
-    """Bend a smoothed polyline so it passes through exact points.
-
-    Checkpoints sit on the raw road, which smoothing may have cut a couple of
-    meters inside the corner. A local smooth bump puts the curve back on the
-    checkpoint without reintroducing a sharp corner.
-    """
-    if not targets or half <= 0 or len(points) < 3:
-        return list(points)
-    out = list(points)
-    for tx, ty in targets:
-        i = min(range(len(out)),
-                key=lambda k: math.dist(out[k], (tx, ty)))
-        dx, dy = tx - out[i][0], ty - out[i][1]
-        pull = math.hypot(dx, dy)
-        if pull <= 1e-9 or pull > max_pull:
-            continue
-        lo = max(0, i - half)
-        hi = min(len(out), i + half + 1)
-        for j in range(lo, hi):
-            w = _smoothstep(1.0 - abs(j - i) / float(half))
-            out[j] = (out[j][0] + dx * w, out[j][1] + dy * w)
-    return out
-
-
 def _smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
 
 
-def _resample(points: list[tuple[float, float]],
-              ds: float) -> list[tuple[float, float]]:
-    """Resample a polyline at a roughly constant spacing."""
-    out: list[tuple[float, float]] = [points[0]]
-    for a, b in zip(points, points[1:]):
-        seg = math.dist(a, b)
-        if seg <= 1e-12:
-            continue
-        steps = max(1, int(math.ceil(seg / ds)))
-        for i in range(1, steps + 1):
-            t = i / steps
-            out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
-    return _dedupe(out)
-
-
-def _smooth(points: list[tuple[float, float]], half: int,
-            passes: int = 2) -> list[tuple[float, float]]:
-    """Triangular moving average that leaves the two ends alone.
-
-    This is what turns the raw GeoJSON polyline into a drivable curve: corners
-    become arcs of roughly ``half`` samples radius, so an offset lane no longer
-    folds back on itself at every vertex. The ends stay untouched so a leg
-    still meets a U-turn perpendicular to the road: the turn-around loop keeps
-    its shape instead of being pulled inward.
-    """
-    if half <= 0 or len(points) < 3:
-        return list(points)
-    n = len(points)
-    working = list(points)
-    for _ in range(max(1, passes)):
-        out: list[tuple[float, float]] = []
-        for i in range(n):
-            edge = min(i, n - 1 - i)
-            if edge < half:
-                # Keep the approach/departure straight; blend out smoothly.
-                out.append(points[i] if edge == 0 else working[i])
-                continue
-            lo = i - half
-            hi = i + half
-            sx = sy = 0.0
-            weight = 0
-            for j in range(lo, hi + 1):
-                w = half + 1 - abs(j - i)
-                sx += working[j][0] * w
-                sy += working[j][1] * w
-                weight += w
-            out.append((sx / weight, sy / weight))
-        working = out
-    return working
-
-
 class _Centerline:
-    """Station lookup on the (smoothed) route centerline."""
+    """Station lookup on the route centerline."""
 
-    def __init__(self, points: list[tuple[float, float]],
-                 smooth_m: float = 0.0, sample_m: float = 0.5):
-        pts = list(points)
-        if smooth_m > 0.0:
-            pts = _resample(pts, sample_m)
-            pts = _smooth(pts, max(1, int(round(smooth_m / sample_m))))
-        self.pts = pts
+    def __init__(self, points: list[tuple[float, float]]):
+        self.pts = list(points)
         self.seg_len: list[float] = []
         self.cum = [0.0]
-        for a, b in zip(pts, pts[1:]):
+        for a, b in zip(self.pts, self.pts[1:]):
             length = math.dist(a, b)
             self.seg_len.append(length)
             self.cum.append(self.cum[-1] + length)
         self.total = self.cum[-1]
-        self.kappa = [0.0] * len(pts)
-        for i in range(1, len(pts) - 1):
-            a, b, c = pts[i - 1], pts[i], pts[i + 1]
-            v1 = (b[0] - a[0], b[1] - a[1])
-            v2 = (c[0] - b[0], c[1] - b[1])
-            l1 = math.hypot(*v1)
-            l2 = math.hypot(*v2)
-            if l1 <= 1e-9 or l2 <= 1e-9:
-                continue
-            cross = v1[0] * v2[1] - v1[1] * v2[0]
-            dot = v1[0] * v2[0] + v1[1] * v2[1]
-            self.kappa[i] = math.atan2(cross, dot) / (0.5 * (l1 + l2))
 
     def at(self, s: float) -> tuple[tuple[float, float], tuple[float, float]]:
         """Return (point, unit tangent) at station s."""
@@ -219,12 +143,6 @@ class _Centerline:
             return (dx / norm, dy / norm)
         return self.at(s)[1]
 
-    def kappa_at(self, s: float) -> float:
-        """Signed curvature (positive = left turn) at station s."""
-        i = bisect.bisect_right(self.cum, s) - 1
-        i = max(1, min(i, len(self.kappa) - 2))
-        return self.kappa[i]
-
     def nearest_s(self, p: tuple[float, float]) -> float:
         """Project a point onto the polyline and return its station."""
         best_s = 0.0
@@ -263,57 +181,17 @@ def _vertex_turns(center: _Centerline):
     return out
 
 
-def _anchor_stations(center: _Centerline, anchors, reversals) -> list[float]:
-    """Checkpoint stations that must be touched, plus both route ends."""
-    out = [0.0, center.total]
-    for p in anchors:
-        s = center.nearest_s((float(p[0]), float(p[1])))
-        # A checkpoint that sits on a U-turn is passed around, not touched.
-        if any(abs(s - r) < REVERSAL_ZONE_M for r in reversals):
-            continue
-        if 0.25 < s < center.total - 0.25:
-            out.append(s)
-    return sorted(set(out))
-
-
-def _raw_cap(s: float, center: _Centerline, reversals,
-             lat_max: float) -> float:
-    """Instantaneous inside-lane cap for one station."""
-    cap = math.inf
-    kappa = center.kappa_at(s)
-    if kappa < -1e-6:            # right turn: the right-hand lane is inside
-        cap = max(MIN_INSIDE_M, INSIDE_RADIUS_FRACTION / -kappa)
-    for station in reversals:
-        d = abs(s - station)
-        if d < REVERSAL_ZONE_M:
-            cap = min(cap, RIGHT_PREFERRED_M
-                      + (lat_max - RIGHT_PREFERRED_M)
-                      * _smoothstep(d / REVERSAL_ZONE_M))
-    return cap
-
-
-def _smooth_caps(caps: list[float], ds: float) -> list[float]:
-    """Widen and blend the cap profile.
-
-    A hard min would yank the lane sideways right at the apex and fold the
-    trail over itself, so the low-cap zone is widened first (moving minimum)
-    and its shoulders are averaged afterwards. The apex keeps its own value,
-    which is the one the no-fold condition needs.
-    """
-    n = len(caps)
-    if n == 0:
-        return caps
-    w_min = max(1, int(round(CAP_MIN_WINDOW_M / ds)))
-    w_avg = max(1, int(round(CAP_SMOOTH_WINDOW_M / ds)))
-    widened = [min(caps[max(0, i - w_min):min(n, i + w_min + 1)])
-               for i in range(n)]
+def _pin_targets(center: _Centerline, anchors, reversals):
+    """Checkpoint positions that the finished path should pass through."""
     out = []
-    for i in range(n):
-        lo = max(0, i - w_avg)
-        hi = min(n, i + w_avg + 1)
-        # Averaging only the widened profile keeps the apex at its own value
-        # while the shoulders ramp over 2*w_avg meters.
-        out.append(sum(widened[lo:hi]) / (hi - lo))
+    for p in anchors:
+        target = (float(p[0]), float(p[1]))
+        station = center.nearest_s(target)
+        if station <= 0.25 or station >= center.total - 0.25:
+            continue
+        if any(abs(station - r) < REVERSAL_ZONE_M for r in reversals):
+            continue
+        out.append((station, target))
     return out
 
 
@@ -358,9 +236,129 @@ def _turn_arc(center: _Centerline, station: float, lat: float,
     return out
 
 
-def _append(out: list[tuple[float, float]], p: tuple[float, float]) -> None:
-    if not out or math.dist(out[-1], p) > 1e-9:
-        out.append(p)
+def _corner_arc(center: _Centerline, index: int, turn: float,
+                a_turn: float, lane_mag: float) -> tuple[float, float, tuple]:
+    """Arc tangent to the right lane before and after a corner.
+
+    ``a_turn`` is the half width used at this corner (it shrinks when the legs
+    are short). The centre is the road-width square's vertex on the inside of
+    the turn; the radius grows by ``lane_mag`` on a left turn because the
+    runner is on the outside lane there. Returns (s_in, s_out, points).
+    """
+    jx, jy = center.pts[index]
+    prev_p = center.pts[index - 1]
+    next_p = center.pts[index + 1]
+    l1 = center.seg_len[index - 1]
+    l2 = center.seg_len[index]
+    u = ((jx - prev_p[0]) / l1, (jy - prev_p[1]) / l1)
+    v = ((next_p[0] - jx) / l2, (next_p[1] - jy) / l2)
+    # Inside normals of both roads: left for a left turn, right for a right one.
+    side = 1.0 if turn > 0.0 else -1.0
+    n_in = (-u[1] * side, u[0] * side)
+    n_out = (-v[1] * side, v[0] * side)
+    cos_turn = math.cos(abs(turn))
+    # The runner is on the inside lane of a right turn (radius a - d) and on
+    # the outside lane of a left turn, which swings wide (radius a + d).
+    radius = max(1e-6, a_turn * (1.0 + cos_turn) + side * lane_mag)
+    cx = jx + a_turn * (n_in[0] + n_out[0])
+    cy = jy + a_turn * (n_in[1] + n_out[1])
+    p = (cx - radius * n_in[0], cy - radius * n_in[1])
+    q = (cx - radius * n_out[0], cy - radius * n_out[1])
+    angle0 = math.atan2(p[1] - cy, p[0] - cx)
+    steps = max(4,
+                int(math.ceil(abs(turn) * radius / ARC_STEP_M)),
+                int(math.ceil(abs(turn) / math.radians(8.0))))
+    points = [p]
+    for i in range(1, steps + 1):
+        angle = angle0 + turn * i / steps
+        points.append((cx + math.cos(angle) * radius,
+                       cy + math.sin(angle) * radius))
+    points[-1] = q
+    s_in = center.cum[index] - a_turn * math.sin(abs(turn))
+    s_out = center.cum[index] + a_turn * math.sin(abs(turn))
+    return s_in, s_out, tuple(points)
+
+
+def _build_corners(center: _Centerline, turns, reversals,
+                   half_width: float, preferred: float) -> list[_Corner]:
+    """Round every corner that is not a U-turn.
+
+    A corner that is too sharp for its square is left to the plain lane path.
+    Checkpoints are handled afterwards by a local bend of the finished path.
+    """
+    specs = sorted((center.cum[i], i, turn, l1, l2)
+                   for i, turn, l1, l2 in turns
+                   if CORNER_MIN_ANGLE_RAD <= abs(turn) < REVERSAL_ANGLE_RAD)
+    if not specs:
+        return []
+    bend = {i: abs(turn) for i, turn, _l1, _l2 in turns}
+    # A smooth curve spreads its turn over many vertices; a corner concentrates
+    # it in one. Sharp corners always get an arc (the lane would otherwise cusp
+    # at the vertex); gentle bends only when they stand out from their
+    # neighbours, so a ring road is not scalloped by one arc per vertex.
+    specs = [spec for spec in specs
+             if abs(spec[2]) >= SHARP_CORNER_RAD
+             or abs(spec[2]) >= CORNER_PEAK_RATIO
+             * max(bend.get(spec[1] - 1, 0.0), bend.get(spec[1] + 1, 0.0))]
+    if not specs:
+        return []
+    # Walk corner vertices and U-turn stations together, in route order.
+    markers = sorted([(s, 0, turn, i, l1, l2) for s, i, turn, l1, l2 in specs]
+                     + [(r, 1, 0.0, -1, 0.0, 0.0) for r in reversals])
+    stations = [m[0] for m in markers]
+    corners: list[_Corner] = []
+    for k, (s_j, kind, turn, index, l1, l2) in enumerate(markers):
+        if kind == 1:
+            continue
+        gap_prev = s_j - (stations[k - 1] if k else 0.0)
+        gap_next = (stations[k + 1] if k + 1 < len(stations) else center.total) - s_j
+        sin_turn = max(1e-6, math.sin(abs(turn)))
+        # The arc's tangent points must stay on the segments that meet at the
+        # corner, so the adjacent segments bound the square as well.
+        a_turn = min(half_width, 0.5 * gap_prev / sin_turn,
+                     0.5 * gap_next / sin_turn, l1 / sin_turn, l2 / sin_turn)
+        cos_turn = math.cos(abs(turn))
+        base = a_turn * (1.0 + cos_turn)
+        if turn < 0.0:
+            # Right turn: the runner is on the inside lane, so the radius
+            # shrinks by the lane offset; keep it above the floor.
+            if base < MIN_TURN_RADIUS_M + 1e-9:
+                continue
+            lane_mag = max(0.0, min(preferred, base - MIN_TURN_RADIUS_M))
+        else:
+            # Left turn: the runner is on the outside lane, radius a + d.
+            lane_mag = preferred
+        s_in2, s_out2, points = _corner_arc(center, index, turn, a_turn,
+                                            lane_mag)
+        corners.append(_Corner(s_in2, s_out2, lane_mag, points))
+    return corners
+
+
+def _noise_scale(s: float, corners) -> float:
+    """Fade the heading wander out at the exact arc endpoints."""
+    scale = 1.0
+    for c in corners:
+        if c.s_in <= s <= c.s_out:
+            return 0.0
+        d = min(abs(s - c.s_in), abs(s - c.s_out))
+        if d < ANCHOR_ZONE_M:
+            scale = min(scale, _smoothstep(d / ANCHOR_ZONE_M))
+    return scale
+
+
+def _lane_target(s: float, corners, preferred: float) -> float:
+    """Lane offset at a station; a tight right-turn arc narrows it slightly."""
+    target = preferred
+    for c in corners:
+        if c.lane >= preferred - 1e-9:
+            continue
+        if c.s_in <= s <= c.s_out:
+            return c.lane
+        d = min(abs(s - c.s_in), abs(s - c.s_out))
+        if d < ANCHOR_ZONE_M:
+            w = _smoothstep(d / ANCHOR_ZONE_M)
+            target = min(target, c.lane + (preferred - c.lane) * w)
+    return target
 
 
 def _path_len(points) -> float:
@@ -420,17 +418,16 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
 
     ``pace_sec`` is seconds per kilometer and ``period_sec`` is the interval
     between location updates. Their product is the distance advanced per
-    update. ``anchors`` (checkpoints and the start) are pulled to the
-    centerline so the runner still reaches them. The whole path is generated
-    up front; playback only interpolates it.
+    update. ``anchors`` (checkpoints and the start) are visited exactly. The
+    whole path is generated up front; playback only interpolates it.
     """
-    pts = _dedupe(route_points)
+    pts = _rdp(_dedupe(route_points), CENTER_SIMPLIFY_M)
     period = max(0.0, float(period_sec))
     max_deg = max(0.0, float(max_deg))
     if len(pts) < 2:
         return StrollPath(tuple(pts), 0.0, 0.0, period, max_deg)
 
-    raw = _Centerline(pts)
+    center = _Centerline(pts)
     pace = max(1e-9, float(pace_sec))
     step_m = max(0.05, 1000.0 / pace * period)
     half = max(0.0, float(road_width) / 2.0)
@@ -438,47 +435,20 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
     lat_max = max(lat_min, half - EDGE_MARGIN_M)
     preferred = min(RIGHT_PREFERRED_M, lat_max)
 
-    # Smooth each leg between U-turns separately: averaging across a fold
-    # would blend the outbound and return lanes and leave the tangent there
-    # undefined. The legs stay pinned to the shared vertex, so the arc that
-    # joins them is built against a well-defined approach direction.
-    turns = _vertex_turns(raw)
-    breaks = [i for i, turn, _l1, _l2 in turns
-              if abs(turn) >= REVERSAL_ANGLE_RAD]
-    bounds = [0, *breaks, len(pts) - 1]
-    legs = [_Centerline(pts[a:b + 1], smooth_m=CENTER_SMOOTH_M,
-                        sample_m=SAMPLE_M).pts
-            for a, b in zip(bounds, bounds[1:])]
-    joined: list[tuple[float, float]] = []
-    for i, leg in enumerate(legs):
-        joined.extend(leg if i == 0 else leg[1:])
-    joined = _pin_points(joined, [(float(p[0]), float(p[1])) for p in anchors],
-                         max(2, int(round(ANCHOR_ZONE_M / SAMPLE_M))))
-    center = _Centerline(joined)
-    reversals: list[float] = []
-    acc = 0.0
-    for leg in legs[:-1]:
-        acc += _path_len(leg)
-        reversals.append(acc)
-    anchors_s = _anchor_stations(center, anchors, reversals)
-
-    # Precompute the inside-lane cap along the route and smooth it, so the
-    # lane narrows gradually before a corner instead of snapping at the apex.
-    sample_count = int(center.total / SAMPLE_M) + 1
-    caps = _smooth_caps(
-        # Clamp to lat_max first: an unbounded cap would poison the average.
-        [min(_raw_cap(i * SAMPLE_M, center, reversals, lat_max), lat_max)
-         for i in range(sample_count)],
-        SAMPLE_M,
-    )
-
-    def cap_at(s: float) -> float:
-        i = int(round(max(0.0, min(center.total, s)) / SAMPLE_M))
-        return caps[min(i, len(caps) - 1)]
-
+    turns = _vertex_turns(center)
+    reversals = sorted(center.cum[i] for i, turn, _l1, _l2 in turns
+                       if abs(turn) >= REVERSAL_ANGLE_RAD)
+    pin_targets = _pin_targets(center, anchors, reversals)
+    corners = _build_corners(center, turns, reversals, half, preferred)
+    # Checkpoints that sit on or next to a corner arc are reached by a local
+    # bend afterwards; fading the lane there would fight the arc.
+    near_corner = [s for s, _p in pin_targets
+                   if any(c.s_in - 1.0 <= s <= c.s_out + 1.0 for c in corners)]
+    anchor_s = sorted({0.0, center.total}
+                      | {s for s, _p in pin_targets
+                         if not any(abs(s - nc) < 1e-9 for nc in near_corner)})
     rng = random.Random(seed)
     max_rad = math.radians(max_deg)
-    lat = rng.uniform(max(lat_min, 1.0), max(lat_min, min(3.8, lat_max)))
 
     # Heading noise is drawn once per location interval and interpolated, so
     # the wander is continuous instead of stepping at every update.
@@ -496,10 +466,23 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
     ds = max(0.2, min(SAMPLE_M, step_m / 4.0))
     pull_per_m = 0.10 / step_m
 
-    dense: list[tuple[float, float]] = [center.pts[0]]
-    pinned: list[int] = [0]
-    rev_index = 0
+    # Schedule the events (corner arcs and U-turn loops) in route order.
+    events = [(c.s_in, 0, c) for c in corners]
+    events.extend((station, 1, None) for station in reversals)
+    events.sort(key=lambda e: (e[0], e[1]))
+    event_index = 0
     anchor_index = 0
+    dev = rng.uniform(-1.0, 1.0) * NOISE_MAX_M
+
+    dense: list[tuple[float, float]] = [center.pts[0]]
+    dense_s: list[float] = [0.0]
+    pinned: list[int] = [0]
+
+    def push(p: tuple[float, float], station: float) -> None:
+        if math.dist(dense[-1], p) > 1e-9:
+            dense.append(p)
+            dense_s.append(station)
+
     s = 0.0
     guard = 0
     limit = int(center.total / ds) + 2
@@ -507,37 +490,66 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
         guard += 1
         s2 = min(center.total, s + ds)
 
-        # U-turns are handled as their own event so the two lanes join in an arc.
-        if rev_index < len(reversals) and s < reversals[rev_index] <= s2 + 1e-9:
-            station = reversals[rev_index]
-            rev_index += 1
-            lat = min(max(lat, lat_min), lat_max, cap_at(station))
-            _append(dense, _offset_point(center, station - 1e-3, lat, reversals))
-            for p in _turn_arc(center, station, lat, reversals):
-                _append(dense, p)
-            s = station
+        if event_index < len(events) and events[event_index][0] <= s2 + 1e-9:
+            station, kind, corner = events[event_index]
+            event_index += 1
+            if kind == 0:
+                # Corner: the arc replaces the lane path around the junction.
+                span = corner.s_out - corner.s_in
+                n = max(1, len(corner.points) - 1)
+                for i, p in enumerate(corner.points):
+                    push(p, corner.s_in + span * i / n)
+                s = corner.s_out
+            else:
+                # U-turn: join the two lanes with a half circle. The loop keeps
+                # the current lane distance so it meets the approach smoothly.
+                lat = max(lat_min, min(lat_max, preferred + dev))
+                push(_offset_point(center, station - 1e-3, lat, reversals),
+                     station)
+                for p in _turn_arc(center, station, lat, reversals):
+                    push(p, station)
+                s = station
             continue
 
-        theta = theta_at(s2)
-        lat += ds * math.sin(theta) + ds * pull_per_m * (preferred - lat)
-        lat = min(max(lat, lat_min), lat_max)
+        dev += ds * math.sin(theta_at(s2)) + ds * pull_per_m * (0.0 - dev)
+        dev = max(-NOISE_MAX_M, min(NOISE_MAX_M, dev))
 
         # Touch checkpoints exactly; the samples around them fade the offset.
-        while (anchor_index < len(anchors_s)
-               and anchors_s[anchor_index] <= s2):
-            station = anchors_s[anchor_index]
+        while (anchor_index < len(anchor_s)
+               and anchor_s[anchor_index] <= s2):
+            station = anchor_s[anchor_index]
             anchor_index += 1
             if station <= s + 1e-9:
                 continue
-            _append(dense, center.at(station)[0])
+            push(center.at(station)[0], station)
             pinned.append(len(dense) - 1)
 
-        lat_eff = min(lat, cap_at(s2)) * _anchor_factor(s2, anchors_s)
-        _append(dense, _offset_point(center, s2, lat_eff, reversals))
+        lane = _lane_target(s2, corners, preferred) \
+            + dev * _noise_scale(s2, corners)
+        lane = max(-lat_max, min(lat_max, lane))
+        lane *= _anchor_factor(s2, anchor_s)
+        push(_offset_point(center, s2, lane, reversals), s2)
         s = s2
 
-    _append(dense, center.pts[-1])
+    push(center.pts[-1], center.total)
     pinned.append(len(dense) - 1)
+
+    # A corner arc replaces the lane, so a checkpoint that sits just before or
+    # after a corner would be missed. Pull the nearest sample onto it with a
+    # local smooth bend (the lane path already touches checkpoints on straights).
+    pin_half = max(3, int(round(1.5 * ANCHOR_ZONE_M / SAMPLE_M)))
+    for s_target, target in pin_targets:
+        i = min(range(len(dense_s)), key=lambda k: abs(dense_s[k] - s_target))
+        dx = target[0] - dense[i][0]
+        dy = target[1] - dense[i][1]
+        if math.hypot(dx, dy) <= 0.02:
+            continue
+        lo = max(0, i - pin_half)
+        hi = min(len(dense), i + pin_half + 1)
+        for j in range(lo, hi):
+            w = _smoothstep(1.0 - abs(j - i) / float(pin_half))
+            dense[j] = (dense[j][0] + dx * w, dense[j][1] + dy * w)
+        pinned.append(i)
     pinned = sorted(set(pinned))
 
     simplified = _simplify(dense, SIMPLIFY_M, pinned)
