@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Main window: interaction, sidebar, mode switching, and pace playback."""
+"""Main window: multi-point route planning, immersive simulation, and playback."""
 
 from __future__ import annotations
 
@@ -20,12 +20,10 @@ from ..pacing import (
 )
 from ..routing.campus_map import CampusMap
 from ..routing.immersive import ImmersiveSession
-from ..routing.models import PointRun, RouteResult
+from ..routing.models import PointRun
 from ..routing.stroll import build_stroll_path
 from .drawing import MapDrawingMixin
 from .theme import (
-    C_A,
-    C_B,
     C_BG,
     C_LINE,
     C_MUTED,
@@ -41,6 +39,10 @@ from .theme import (
 )
 from .widgets import ValueSlider
 
+MAX_POINTS = 15
+DEFAULT_SNAP_RADIUS_M = 25
+DEFAULT_ARROW_SPACING_M = 100
+
 
 class CampusNavApp(MapDrawingMixin):
     """Main window for GDPU ZS Navigation."""
@@ -54,13 +56,18 @@ class CampusNavApp(MapDrawingMixin):
             [self.cmap.proj.xy(lon, lat) for lon, lat in ring]
             for fence in self.fences for ring in fence.rings
         ]
-        self.points: list[tuple[float, float]] = []      # [(lon, lat)], at most 2
-        self.result: RouteResult | None = None
-        self.error: str | None = None
-        self.mode = "point"                              # point / run
+
+        # Route planning: an ordered list of map points and the planned legs.
+        self.mode = "route"                             # route / immersive
+        self.points: list[tuple[float, float]] = []     # lon/lat, at most MAX_POINTS
+        self.plan: PointRun | None = None
+        self.plan_error: str | None = None
+        self.snap_radius_m = DEFAULT_SNAP_RADIUS_M
+        self.arrow_spacing_m = DEFAULT_ARROW_SPACING_M
+
+        # Immersive simulation: a scoring run revealed and played back live.
         self.run: PointRun | None = None
         self.run_error: str | None = None
-        self.immersive = tk.BooleanVar(value=False)
         self.immersive_session: ImmersiveSession | None = None
         self.reduce_backtrack = tk.BooleanVar(value=False)
         self.run_limit = tk.BooleanVar(value=False)
@@ -69,6 +76,8 @@ class CampusNavApp(MapDrawingMixin):
         self.gps_period_sec = 1
         self.heading_max_deg = 3
         self._stroll_seed = 0
+
+        # Viewport
         self.scale = 0.0
         self.ox = 0.0
         self.oy = 0.0
@@ -81,7 +90,7 @@ class CampusNavApp(MapDrawingMixin):
         self._last_click = 0.0
         self._closing = False
 
-        # Pace / motion playback (controlled by the play button, no separate switch)
+        # Pace playback (immersive only, controlled by the play button)
         self.pace_seconds = PACE_DEFAULT_SEC
         self._playing = False
         self._anim_after: str | None = None
@@ -130,14 +139,14 @@ class CampusNavApp(MapDrawingMixin):
             fg="#1f2d3d", bg=C_SIDEBAR,
         ).pack(side="left", padx=(P(20), P(12)), pady=(P(12), P(9)))
         tk.Label(
-            head, text="Shortest route · Distance · Pace demo",
+            head, text="Multi-point routes · Immersive run",
             font=(FONT_UI, 9), fg=C_MUTED, bg=C_SIDEBAR,
         ).pack(side="left", pady=(P(18), P(9)))
 
         mode_frame = tk.Frame(head, bg=C_SIDEBAR)
         mode_frame.pack(side="right", padx=(P(10), P(20)), pady=(P(10), P(8)))
         self.mode_btns: dict[str, tk.Button] = {}
-        for key, label in (("point", "Route"), ("run", "Scoring Run")):
+        for key, label in (("route", "Route"), ("immersive", "Immersive")):
             btn = tk.Button(
                 mode_frame, text=label,
                 command=lambda k=key: self._set_mode(k),
@@ -189,16 +198,22 @@ class CampusNavApp(MapDrawingMixin):
                 bg=C_SIDEBAR, anchor="w",
             ).pack(fill="x", padx=P(18), pady=(P(top), P(6)))
 
-        def hr() -> None:
-            tk.Frame(side, bg="#ece7de", height=P(1)).pack(
-                fill="x", padx=P(18), pady=P(8)
-            )
+        def caption(text: str, parent=None) -> None:
+            tk.Label(
+                parent or side, text=text, font=(FONT_UI, 8), fg=C_MUTED,
+                bg=C_SIDEBAR, justify="left", anchor="w", wraplength=P(304),
+            ).pack(fill="x", padx=P(18))
+
+        def hr() -> tk.Frame:
+            line = tk.Frame(side, bg="#ece7de", height=P(1))
+            line.pack(fill="x", padx=P(18), pady=P(8))
+            return line
 
         # Status
         section("Status", 16)
         self.status_lbl = tk.Label(
             side, text="", font=(FONT_UI, 9), fg=C_STATUS_FG, bg=C_STATUS_BG,
-            justify="left", anchor="nw", wraplength=P(286),
+            justify="left", anchor="nw", wraplength=P(272),
             padx=P(10), pady=P(9),
         )
         self.status_lbl.pack(fill="x", padx=P(18))
@@ -207,7 +222,7 @@ class CampusNavApp(MapDrawingMixin):
         section("Actions")
         btn_row = tk.Frame(side, bg=C_SIDEBAR)
         btn_row.pack(fill="x", padx=P(18))
-        self.action_btn = ttk.Button(btn_row, text="Undo", command=self.undo, width=7)
+        self.action_btn = ttk.Button(btn_row, text="Undo", command=self.undo, width=8)
         self.clear_btn = ttk.Button(btn_row, text="Clear", command=self.clear, width=7)
         self.fit_btn = ttk.Button(btn_row, text="Fit view", command=self._fit_view, width=9)
         for col, btn in enumerate((self.action_btn, self.clear_btn, self.fit_btn)):
@@ -220,8 +235,9 @@ class CampusNavApp(MapDrawingMixin):
             font=(FONT_UI, 9), anchor="w", padx=0, bd=0, highlightthickness=0,
         ).pack(fill="x", padx=P(15), pady=(P(9), 0))
 
-        # Pace
-        pace_head = tk.Frame(side, bg=C_SIDEBAR)
+        # Pace (immersive playback only; hidden in route planning)
+        self.pace_box = tk.Frame(side, bg=C_SIDEBAR)
+        pace_head = tk.Frame(self.pace_box, bg=C_SIDEBAR)
         pace_head.pack(fill="x", padx=P(18), pady=(P(13), P(4)))
         tk.Label(
             pace_head, text="Pace", font=(FONT_UI, 9, "bold"),
@@ -233,7 +249,7 @@ class CampusNavApp(MapDrawingMixin):
         )
         self.pace_hint_lbl.pack(side="right")
 
-        pace_row = tk.Frame(side, bg=C_SIDEBAR)
+        pace_row = tk.Frame(self.pace_box, bg=C_SIDEBAR)
         pace_row.pack(fill="x", padx=P(18))
         self.play_btn = tk.Button(
             pace_row, text="Play", command=self._toggle_play,
@@ -259,12 +275,12 @@ class CampusNavApp(MapDrawingMixin):
         )
 
         self.pace_bar = tk.Canvas(
-            side, height=P(9), bg=C_SIDEBAR, highlightthickness=0,
+            self.pace_box, height=P(9), bg=C_SIDEBAR, highlightthickness=0,
         )
         self.pace_bar.pack(fill="x", padx=P(18), pady=(P(7), P(1)))
         self.pace_bar.bind("<Configure>", lambda e: self._update_pace_ui())
 
-        info_row = tk.Frame(side, bg=C_SIDEBAR)
+        info_row = tk.Frame(self.pace_box, bg=C_SIDEBAR)
         info_row.pack(fill="x", padx=P(18))
         self.pace_dist_lbl = tk.Label(
             info_row, text="—", font=(FONT_UI, 9), fg="#6f675c",
@@ -277,55 +293,103 @@ class CampusNavApp(MapDrawingMixin):
         )
         self.pace_time_lbl.pack(side="right")
 
-        hr()
+        self.sep_after_pace = hr()
 
-        # Mode content: two-point route / scoring run
+        # Mode content
         self.mode_content = tk.Frame(side, bg=C_SIDEBAR)
         self.mode_content.pack(fill="x")
 
-        self.point_box = tk.Frame(self.mode_content, bg=C_SIDEBAR)
-        self.run_box = tk.Frame(self.mode_content, bg=C_SIDEBAR)
-        self.point_box.pack(fill="x")
+        self.route_box = tk.Frame(self.mode_content, bg=C_SIDEBAR)
+        self.immersive_box = tk.Frame(self.mode_content, bg=C_SIDEBAR)
 
-        section("Points", 0, self.point_box)
-        self.coord_lbls: dict[str, tk.Label] = {}
-        for key, color in (("A", C_A), ("B", C_B), ("C", C_ROUTE), ("D", C_ROUTE)):
-            row = tk.Frame(self.point_box, bg=C_SIDEBAR)
-            row.pack(fill="x", padx=P(18), pady=P(1))
-            tk.Label(
-                row, text=key, width=2, font=(FONT_UI, 9, "bold"), fg=color,
-                bg=C_SIDEBAR, anchor="w",
-            ).pack(side="left")
-            lbl = tk.Label(
-                row, text="—", font=(FONT_MONO, 9), fg=C_TEXT, bg=C_SIDEBAR, anchor="w",
-            )
-            lbl.pack(side="left", fill="x", expand=True)
-            self.coord_lbls[key] = lbl
+        # ---- Route planning box -----------------------------------------
+        section("Route points", 0, self.route_box)
+        count_row = tk.Frame(self.route_box, bg=C_SIDEBAR)
+        count_row.pack(fill="x", padx=P(18), pady=(P(1), P(2)))
+        tk.Label(
+            count_row, text="Selected", font=(FONT_UI, 9), fg=C_TEXT,
+            bg=C_SIDEBAR, anchor="w",
+        ).pack(side="left")
+        self.point_count_lbl = tk.Label(
+            count_row, text=f"0 / {MAX_POINTS}", font=(FONT_MONO, 9),
+            fg=C_MUTED, bg=C_SIDEBAR, anchor="e",
+        )
+        self.point_count_lbl.pack(side="right")
 
-        # Scoring-run description (shown when run_box is active)
-        section("Scoring run (5 points)", 0, self.run_box)
-        self.run_desc_lbl = tk.Label(
-            self.run_box, text="Five ordered waypoints appear on roads; numbers show the order.",
+        self.point_list_frame = tk.Frame(self.route_box, bg=C_SIDEBAR)
+        self.point_list_frame.pack(fill="x", padx=P(18), pady=(0, P(2)))
+
+        plan_row = tk.Frame(self.route_box, bg=C_SIDEBAR)
+        plan_row.pack(fill="x", padx=P(18), pady=(P(6), P(1)))
+        self.random_btn = ttk.Button(
+            plan_row, text="Random 5", command=self._random_route_points, width=9,
+        )
+        self.random_btn.pack(side="left")
+        self.start_btn = tk.Button(
+            plan_row, text="Start", command=self._start_plan,
+            font=(FONT_UI, 9, "bold"), bg="#e3e8ef", fg="#9aa5b4",
+            activebackground=C_ROUTE, activeforeground="#ffffff",
+            disabledforeground="#9aa5b4", relief="flat", bd=0,
+            padx=P(14), pady=P(3), cursor="hand2", state="disabled",
+        )
+        self.start_btn.pack(side="right")
+        tk.Label(
+            plan_row, text="Enter", font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR,
+        ).pack(side="right", padx=(0, P(7)))
+
+        caption("Click the map to add points; press Start to plan the whole sequence.",
+                self.route_box)
+
+        snap_head = tk.Frame(self.route_box, bg=C_SIDEBAR)
+        snap_head.pack(fill="x", padx=P(18), pady=(P(11), P(2)))
+        tk.Label(
+            snap_head, text="Snap radius", font=(FONT_UI, 9, "bold"),
+            fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
+        ).pack(side="left")
+        self.snap_val_lbl = tk.Label(
+            snap_head, text=f"{self.snap_radius_m} m", font=(FONT_MONO, 8),
+            fg=C_TEXT, bg=C_SIDEBAR, anchor="e",
+        )
+        self.snap_val_lbl.pack(side="right")
+        self.snap_slider = ValueSlider(
+            self.route_box, min_value=0, max_value=60,
+            value=self.snap_radius_m, on_change=self._on_snap_slide,
+            ui_scale=self.ui,
+        )
+        self.snap_slider.pack(fill="x", padx=P(18), pady=(0, P(3)))
+        caption("Points within this distance join the road without a connector.",
+                self.route_box)
+
+        arrow_head = tk.Frame(self.route_box, bg=C_SIDEBAR)
+        arrow_head.pack(fill="x", padx=P(18), pady=(P(11), P(2)))
+        tk.Label(
+            arrow_head, text="Arrow spacing", font=(FONT_UI, 9, "bold"),
+            fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
+        ).pack(side="left")
+        self.arrow_val_lbl = tk.Label(
+            arrow_head, text=f"{self.arrow_spacing_m} m", font=(FONT_MONO, 8),
+            fg=C_TEXT, bg=C_SIDEBAR, anchor="e",
+        )
+        self.arrow_val_lbl.pack(side="right")
+        self.arrow_slider = ValueSlider(
+            self.route_box, min_value=20, max_value=200,
+            value=self.arrow_spacing_m, on_change=self._on_arrow_slide,
+            ui_scale=self.ui,
+        )
+        self.arrow_slider.pack(fill="x", padx=P(18), pady=(0, P(3)))
+        caption("Direction arrows repeat at this spacing along the route.",
+                self.route_box)
+
+        # ---- Immersive box ----------------------------------------------
+        section("Immersive simulation", 0, self.immersive_box)
+        tk.Label(
+            self.immersive_box,
+            text="Pick a start, then reveal five checkpoints one at a time.",
             font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR,
             justify="left", anchor="w", wraplength=P(304),
-        )
-        self.run_desc_lbl.pack(fill="x", padx=P(18), pady=(P(2), P(2)))
+        ).pack(fill="x", padx=P(18), pady=(P(2), P(4)))
 
-        seq_row = tk.Frame(self.run_box, bg=C_SIDEBAR)
-        seq_row.pack(fill="x", padx=P(18), pady=(P(3), P(2)))
-        tk.Checkbutton(
-            seq_row, text="Immersive", variable=self.immersive,
-            command=self._on_immersive_toggle,
-            bg=C_SIDEBAR, fg=C_TEXT, activebackground=C_SIDEBAR,
-            selectcolor=C_SIDEBAR, font=(FONT_UI, 9), anchor="w",
-            bd=0, highlightthickness=0, padx=0,
-        ).pack(side="left")
-        tk.Label(
-            seq_row, text="1 → 2 → 3 → 4 → 5",
-            font=(FONT_UI, 9, "bold"), fg=C_TEMP, bg=C_SIDEBAR, anchor="e",
-        ).pack(side="right")
-
-        opt_row = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        opt_row = tk.Frame(self.immersive_box, bg=C_SIDEBAR)
         opt_row.pack(fill="x", padx=P(18), pady=(P(4), P(1)))
         tk.Checkbutton(
             opt_row, text="Reduce backtracking", variable=self.reduce_backtrack,
@@ -339,7 +403,7 @@ class CampusNavApp(MapDrawingMixin):
             font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR,
         ).pack(side="left", padx=(P(5), 0))
 
-        cap_row = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        cap_row = tk.Frame(self.immersive_box, bg=C_SIDEBAR)
         cap_row.pack(fill="x", padx=P(18), pady=(P(2), P(1)))
         tk.Checkbutton(
             cap_row, text="Daily cap", variable=self.run_limit,
@@ -365,7 +429,7 @@ class CampusNavApp(MapDrawingMixin):
         self.cap_lbl.pack(side="left", padx=(P(6), 0))
         self._update_gender_buttons()
 
-        stroll_row = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        stroll_row = tk.Frame(self.immersive_box, bg=C_SIDEBAR)
         stroll_row.pack(fill="x", padx=P(18), pady=(P(2), P(1)))
         tk.Checkbutton(
             stroll_row, text="Stroll", variable=self.stroll,
@@ -380,7 +444,7 @@ class CampusNavApp(MapDrawingMixin):
         ).pack(side="left", padx=(P(5), 0))
         self.stroll_row = stroll_row
 
-        self.stroll_box = tk.Frame(self.run_box, bg=C_SIDEBAR)
+        self.stroll_box = tk.Frame(self.immersive_box, bg=C_SIDEBAR)
         period_head = tk.Frame(self.stroll_box, bg=C_SIDEBAR)
         period_head.pack(fill="x", padx=P(18))
         tk.Label(
@@ -422,7 +486,7 @@ class CampusNavApp(MapDrawingMixin):
 
         # Distance
         self.mileage_title = tk.Label(
-            side, text="Distance (with connectors)", font=(FONT_UI, 9, "bold"),
+            side, text="Distance", font=(FONT_UI, 9, "bold"),
             fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
         )
         self.mileage_title.pack(fill="x", padx=P(18), pady=(0, P(6)))
@@ -440,9 +504,9 @@ class CampusNavApp(MapDrawingMixin):
         grid = tk.Frame(side, bg=C_SIDEBAR)
         grid.pack(fill="x", padx=P(18), pady=(P(4), 0))
         grid.columnconfigure(1, weight=1)
-        self.mile_name_lbls: list[tk.Label] = []
-        self.mile_val_lbls: list[tk.Label] = []
-        for row in range(6):
+        self.leg_name_lbls: list[tk.Label] = []
+        self.leg_val_lbls: list[tk.Label] = []
+        for row in range(MAX_POINTS - 1):
             name = tk.Label(
                 grid, text="", font=(FONT_UI, 8), fg=C_MUTED,
                 bg=C_SIDEBAR, anchor="w",
@@ -453,13 +517,12 @@ class CampusNavApp(MapDrawingMixin):
                 bg=C_SIDEBAR, anchor="e",
             )
             val.grid(row=row, column=1, sticky="e", pady=1)
-            self.mile_name_lbls.append(name)
-            self.mile_val_lbls.append(val)
+            self.leg_name_lbls.append(name)
+            self.leg_val_lbls.append(val)
 
         # Bottom hint
         self.hint_lbl = tk.Label(
-            side,
-            text="Left-click to pick · Drag outside fence to pan · Wheel to zoom · Ctrl+Z undo",
+            side, text="",
             font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR, justify="left",
             wraplength=P(304),
         )
@@ -480,6 +543,8 @@ class CampusNavApp(MapDrawingMixin):
         self.canvas.bind("<Configure>", self._on_configure)
         self.root.bind("<Control-z>", self._on_undo_key)
         self.root.bind("<Control-Z>", self._on_undo_key)
+        self.root.bind("<Return>", self._on_enter_key)
+        self.root.bind("<KP_Enter>", self._on_enter_key)
         self.root.bind_all("<MouseWheel>", self._on_sidebar_wheel, add="+")
         self.root.bind_all("<Button-4>", self._on_sidebar_wheel, add="+")
         self.root.bind_all("<Button-5>", self._on_sidebar_wheel, add="+")
@@ -497,7 +562,14 @@ class CampusNavApp(MapDrawingMixin):
         self.undo()
         return "break"
 
+    def _on_enter_key(self, _event) -> str | None:
+        if self.mode == "route" and len(self.points) >= 2:
+            self._start_plan()
+            return "break"
+        return None
+
     def _on_sidebar_wheel(self, event):
+        """Scroll the sidebar; sliders ignore the wheel, so their values stay put."""
         widget = self.root.winfo_containing(event.x_root, event.y_root)
         w = widget
         while w is not None:
@@ -505,8 +577,6 @@ class CampusNavApp(MapDrawingMixin):
                 break
             w = w.master
         else:
-            return None
-        if widget is None:
             return None
         num = getattr(event, "num", None)
         if num == 4:
@@ -560,41 +630,42 @@ class CampusNavApp(MapDrawingMixin):
         self._left_moved = False
         self._left_pan_anchor = None
         if moved:
-            self.canvas.configure(cursor=self._run_cursor())
+            self.canvas.configure(cursor=self._mode_cursor())
             return
         self._select_at(event.x, event.y)
 
     def _select_at(self, px: float, py: float) -> None:
-        if self.mode == "run":
-            if self.immersive.get() and self.run is None:
+        if self.mode == "immersive":
+            if self.run is None:
                 self._start_immersive_at(px, py)
             return
-        if self.mode != "point":
-            return
+
         now = time.monotonic()
-        if now - self._last_click < 0.18:      # avoid picking two points on a double-click
+        if now - self._last_click < 0.18:      # avoid picking twice on a double-click
             return
         self._last_click = now
 
         x, y = self._world_at(px, py)
         lon, lat = self.cmap.proj.lonlat(x, y)
-        pt = (lon, lat)
 
-        if len(self.points) >= 2:              # A and B set: a third click starts a new query
-            self.points = [pt]
-        else:
-            self.points.append(pt)
-        self.error = None
-        self.result = None
-        if len(self.points) == 2:
-            self._solve()
+        if len(self.points) >= MAX_POINTS:
+            self.plan_error = (
+                f"At most {MAX_POINTS} points. Press Clear to start a new route."
+            )
+            self._sync_side()
+            self._redraw()
+            return
+
+        self.points.append((lon, lat))
+        self.plan = None
+        self.plan_error = None
         self._on_route_changed()
         self._sync_side()
         self._redraw()
 
     def _start_immersive_at(self, px: float, py: float) -> None:
         """While immersive mode waits for a start, convert a canvas click to local metric coordinates."""
-        if not self.immersive.get() or self.run is not None:
+        if self.mode != "immersive" or self.run is not None:
             return
         x, y = self._world_at(px, py)
         self._start_immersive((x, y))
@@ -666,12 +737,12 @@ class CampusNavApp(MapDrawingMixin):
 
     def _pan_end(self, _event) -> None:
         self._pan_anchor = None
-        self.canvas.configure(cursor=self._run_cursor())
+        self.canvas.configure(cursor=self._mode_cursor())
 
-    def _run_cursor(self) -> str:
-        if self.mode == "point":
+    def _mode_cursor(self) -> str:
+        if self.mode == "route":
             return "crosshair"
-        if self.immersive.get() and self.run is None:
+        if self.run is None:
             return "crosshair"
         return "arrow"
 
@@ -715,6 +786,8 @@ class CampusNavApp(MapDrawingMixin):
 
     def _rebuild_anim_keep_position(self) -> None:
         """Regenerate the (possibly strolled) path without losing progress."""
+        if self.mode != "immersive":
+            return
         old_time = self._anim_total_time
         frac = (self._sim_time / old_time) if old_time > 0.0 else 0.0
         frac = min(1.0, max(0.0, frac))
@@ -734,25 +807,26 @@ class CampusNavApp(MapDrawingMixin):
 
     def _active_track(self):
         """Full route used for drawing/playback in the current mode: (points, distance, areas)."""
-        if self.mode == "run":
-            if not self.run:
+        if self.mode == "route":
+            if not self.plan:
                 return None
-            return self.run.path, self.run.total_m, self.run.areas_used
-        if not self.result:
+            return self.plan.path, self.plan.total_m, self.plan.areas_used
+        if not self.run:
             return None
-        r = self.result
-        return [r.a_xy] + r.path + [r.b_xy], r.total_m, r.areas_used
+        return self.run.path, self.run.total_m, self.run.areas_used
 
     def _stroll_active(self) -> bool:
-        return self.mode == "run" and self.stroll.get() and self.run is not None
+        return self.mode == "immersive" and self.stroll.get() and self.run is not None
 
     def _refresh_anim_path(self) -> None:
-        """Rebuild playback samples from the current full route."""
+        """Rebuild playback samples from the current full route (immersive only)."""
         self._anim_pts = []
         self._anim_cum = []
         self._anim_total = 0.0
         self._anim_total_time = 0.0
 
+        if self.mode != "immersive":
+            return
         track = self._active_track()
         if not track:
             return
@@ -838,8 +912,8 @@ class CampusNavApp(MapDrawingMixin):
         return extended
 
     def _toggle_play(self) -> None:
-        if (self._closing or not self._anim_pts
-                or self._anim_total_time <= 0.0):
+        if (self._closing or self.mode != "immersive"
+                or not self._anim_pts or self._anim_total_time <= 0.0):
             return
         if self._playing:
             self._stop_animation()
@@ -902,6 +976,10 @@ class CampusNavApp(MapDrawingMixin):
         return pts[0], (1.0, 0.0)
 
     def _update_pace_ui(self) -> None:
+        if self.mode == "route":
+            self._update_route_readout()
+            return
+
         track = self._active_track()
         total_m = track[1] if track else None
         total_t = self._anim_total_time
@@ -948,6 +1026,25 @@ class CampusNavApp(MapDrawingMixin):
         else:
             self.play_btn.configure(text="Play")
 
+    def _update_route_readout(self) -> None:
+        plan = self.plan
+        if plan is not None:
+            self.total_lbl.configure(text=fmt_len(plan.total_m), fg=C_ROUTE)
+            self.mileage_sub_lbl.configure(
+                text=f"{len(plan.points_xy)} points · {len(plan.legs)} legs"
+            )
+        else:
+            self.total_lbl.configure(text="—", fg=C_MUTED)
+            self.mileage_sub_lbl.configure(
+                text=f"{len(self.points)} / {MAX_POINTS} points"
+            )
+        self.pace_dist_lbl.configure(text="—")
+        self.pace_time_lbl.configure(text="—")
+        self.play_btn.configure(
+            state="disabled", bg="#e3e8ef", fg="#9aa5b4", text="Play"
+        )
+        self._draw_pace_bar(0.0)
+
     def _draw_pace_bar(self, frac: float) -> None:
         c = self.pace_bar
         w = c.winfo_width()
@@ -963,70 +1060,107 @@ class CampusNavApp(MapDrawingMixin):
             c.create_line(0, y, x, y, fill=C_PACE,
                           width=self.pxf(4), capstyle=tk.ROUND)
 
-    # ---- Point selection / undo / solve ----------------------------------
+    # ---- Route planning --------------------------------------------------
     def set_points(self, pts: list[tuple[float, float]]) -> None:
-        if self.mode != "point":
+        """Set route points programmatically and plan immediately (used by --demo)."""
+        self.mode = "route"
+        self.points = list(pts)[:MAX_POINTS]
+        self.plan = None
+        self.plan_error = None
+        self._start_plan()
+
+    def _start_plan(self) -> None:
+        if self.mode != "route":
             return
-        self.points = list(pts)[:2]
-        self.error = None
-        self.result = None
-        if len(self.points) == 2:
-            self._solve()
+        self._stop_animation()
+        self._sim_time = 0.0
+        if len(self.points) < 2:
+            self.plan = None
+            self.plan_error = "Select at least two points before starting."
+            self._on_route_changed()
+            self._sync_side()
+            self._redraw()
+            return
+        try:
+            plan = self.cmap.plan_point_run(
+                points=list(self.points), snap_radius=self.snap_radius_m,
+            )
+        except Exception as exc:
+            plan = None
+            self.plan_error = f"Planning failed: {exc}"
+        if plan is None:
+            self.plan = None
+            if not self.plan_error:
+                self.plan_error = "No connected route could be planned for these points."
+        else:
+            self.plan = plan
+            self.plan_error = None
         self._on_route_changed()
         self._sync_side()
         self._redraw()
 
-    def _solve(self) -> None:
-        a = self.cmap.proj.xy(*self.points[0])
-        b = self.cmap.proj.xy(*self.points[1])
+    def _random_route_points(self) -> None:
+        self._stop_animation()
+        self._sim_time = 0.0
         try:
-            self.result = self.cmap.shortest_route(a, b)
-        except Exception as exc:                       # should not happen; last-resort message
-            self.result = None
-            self.error = f"Planning failed: {exc}"
+            plan = self.cmap.plan_point_run(
+                5, min_sep_m=60.0, snap_radius=self.snap_radius_m,
+            )
+        except Exception as exc:
+            plan = None
+            self.plan_error = f"Generation failed: {exc}"
+        if plan is None:
+            if not self.plan_error:
+                self.plan_error = "Could not generate random points. Please try again."
+            self._sync_side()
+            self._redraw()
             return
-        if self.result is None:
-            self.error = "The road network is disconnected; no route can be planned."
+        self.points = [tuple(p) for p in plan.points_lonlat]
+        self.plan = plan
+        self.plan_error = None
+        self._on_route_changed()
+        self._sync_side()
+        self._fit_view()
+
+    def _on_snap_slide(self, value: int) -> None:
+        self.snap_radius_m = int(value)
+        self.snap_val_lbl.configure(text=f"{self.snap_radius_m} m")
+        if self.mode == "route" and self.plan is not None:
+            self._start_plan()
+        else:
+            self._redraw()
+
+    def _on_arrow_slide(self, value: int) -> None:
+        self.arrow_spacing_m = int(value)
+        self.arrow_val_lbl.configure(text=f"{self.arrow_spacing_m} m")
+        if self.mode == "route":
+            self._redraw()
 
     def undo(self) -> None:
-        if self.mode != "point" or not self.points:
+        if self.mode != "route" or not self.points:
             return
         self.points.pop()
-        self.result = None
-        self.error = None
+        self.plan = None
+        self.plan_error = None
         self._on_route_changed()
         self._sync_side()
         self._redraw()
 
     def clear(self) -> None:
-        if self.mode == "run":
-            if self.immersive.get():
-                if (self.run is None and not self.run_error
-                        and self.immersive_session is None):
-                    return
-                self._restart_immersive()
-                return
-            if self.run is None and not self.run_error:
-                return
-            self.run = None
-            self.run_error = None
-            self._on_route_changed()
-            self._sync_side()
-            self._redraw()
+        if self.mode == "immersive":
+            self._restart_immersive()
             return
-        if not self.points and self.result is None and not self.error:
+        if not self.points and self.plan is None and not self.plan_error:
             return
         self.points = []
-        self.result = None
-        self.error = None
+        self.plan = None
+        self.plan_error = None
         self._on_route_changed()
         self._sync_side()
         self._redraw()
 
     def _restart_immersive(self) -> None:
         """Clear the current immersive run and wait for a new start point."""
-        if not self.immersive.get():
-            return
         self._stop_animation()
         self._sim_time = 0.0
         self.immersive_session = None
@@ -1040,7 +1174,7 @@ class CampusNavApp(MapDrawingMixin):
     def _active_areas(self) -> set[int]:
         track = self._active_track()
         active: set[int] = set(track[2]) if track else set()
-        if self.mode == "point":
+        if self.mode == "route":
             for pt in self.points:
                 ai = self.cmap.area_at(*self.cmap.proj.xy(*pt))
                 if ai is not None:
@@ -1049,153 +1183,151 @@ class CampusNavApp(MapDrawingMixin):
 
     # ---- Sidebar sync ----------------------------------------------------
     def _sync_side(self) -> None:
-        if self.mode == "run":
-            self._sync_run_side()
+        self._sync_mode_visibility()
+        if self.mode == "route":
+            self._sync_route_side()
         else:
-            self._sync_point_side()
+            self._sync_immersive_side()
         self._update_mode_buttons()
+        self._update_pace_ui()
 
-    def _sync_point_side(self) -> None:
-        n = len(self.points)
-        if self.error:
-            status, color = self.error, "#b3261e"
-        elif n == 0:
-            status, color = "Left-click the map to choose start point A.", C_STATUS_FG
-        elif n == 1:
-            status, color = "A selected. Click the map to choose endpoint B, or use Undo.", C_STATUS_FG
+    def _sync_mode_visibility(self) -> None:
+        route = self.mode == "route"
+        if route:
+            self.immersive_box.pack_forget()
+            if not self.route_box.winfo_manager():
+                self.route_box.pack(fill="x")
+            self.pace_box.pack_forget()
+            self.clear_btn.grid()
         else:
-            status = ("Shortest route planned. Blue is the campus route; orange dashes "
-                      "are temporary connectors. Click the map again for a new query.")
-            if self.result and self.result.areas_used:
+            self.route_box.pack_forget()
+            if not self.immersive_box.winfo_manager():
+                self.immersive_box.pack(fill="x")
+            if not self.pace_box.winfo_manager():
+                # Keep the separator below the pace block in both modes.
+                self.pace_box.pack(fill="x", before=self.sep_after_pace)
+            self.clear_btn.grid_remove()
+
+    def _sync_point_list(self) -> None:
+        for child in self.point_list_frame.winfo_children():
+            child.destroy()
+        if not self.points:
+            tk.Label(
+                self.point_list_frame, text="No points yet.",
+                font=(FONT_UI, 8), fg=C_MUTED, bg=C_SIDEBAR, anchor="w",
+            ).pack(fill="x", pady=self.px(1))
+            return
+        for idx, pt in enumerate(self.points, 1):
+            row = tk.Frame(self.point_list_frame, bg=C_SIDEBAR)
+            row.pack(fill="x", pady=self.px(1))
+            tk.Label(
+                row, text=str(idx), width=3, font=(FONT_MONO, 8, "bold"),
+                fg=C_TEMP, bg=C_SIDEBAR, anchor="w",
+            ).pack(side="left")
+            tk.Label(
+                row, text=fmt_lonlat(pt), font=(FONT_MONO, 8),
+                fg=C_TEXT, bg=C_SIDEBAR, anchor="w",
+            ).pack(side="left", fill="x", expand=True)
+
+    def _set_leg_row(self, index: int, name: str, value: str) -> None:
+        self.leg_name_lbls[index].configure(text=name)
+        self.leg_val_lbls[index].configure(text=value)
+        self.leg_name_lbls[index].grid()
+        self.leg_val_lbls[index].grid()
+
+    def _clear_leg_rows(self) -> None:
+        for i in range(len(self.leg_name_lbls)):
+            self.leg_name_lbls[i].grid_remove()
+            self.leg_val_lbls[i].grid_remove()
+
+    def _sync_route_side(self) -> None:
+        n = len(self.points)
+        if self.plan_error:
+            status, color = self.plan_error, "#b3261e"
+        elif n == 0:
+            status, color = (
+                "Click the map to add route points; two or more are needed.", C_STATUS_FG
+            )
+        elif n == 1:
+            status, color = "1 point selected. Add one more, then press Start.", C_STATUS_FG
+        elif self.plan is None:
+            status, color = (
+                f"{n} points selected. Press Start (Enter) to plan the route.",
+                C_STATUS_FG,
+            )
+        else:
+            status = (f"{n} points planned, {fmt_len(self.plan.total_m)} total. "
+                      f"Direction arrows every {self.arrow_spacing_m} m.")
+            if self.plan.areas_used:
                 names = ", ".join(
-                    self.cmap.areas[i].desc for i in sorted(self.result.areas_used)
+                    self.cmap.areas[i].desc for i in sorted(self.plan.areas_used)
                 )
-                status += f" Area highlighted: {names} (freely traversable)."
+                status += f" Area highlighted: {names}."
             color = C_STATUS_FG
         self.status_lbl.configure(text=status, fg=color)
 
-        for key, pt in (("A", self.points[0] if n >= 1 else None),
-                        ("B", self.points[1] if n >= 2 else None)):
-            self.coord_lbls[key].configure(text=fmt_lonlat(pt) if pt else "—")
+        self.point_count_lbl.configure(text=f"{n} / {MAX_POINTS}")
+        self._sync_point_list()
 
-        self.mileage_title.configure(text="Distance (with connectors)")
-        names = ("A→C connector", "C→D campus route", "D→B connector")
-        if self.result:
-            r = self.result
-            self.coord_lbls["C"].configure(text=fmt_lonlat(r.c_lonlat))
-            self.coord_lbls["D"].configure(text=fmt_lonlat(r.d_lonlat))
-            values = (fmt_len(r.ac_m), fmt_len(r.net_m), fmt_len(r.bd_m))
+        ready = n >= 2
+        self.start_btn.configure(
+            state="normal" if ready else "disabled",
+            bg=C_ROUTE if ready else "#e3e8ef",
+            fg="#ffffff" if ready else "#9aa5b4",
+            cursor="hand2" if ready else "arrow",
+        )
+        self.action_btn.configure(text="Undo", command=self.undo)
+        self.action_btn.state(["!disabled"] if n else ["disabled"])
+        self.clear_btn.configure(text="Clear", command=self.clear)
+        self.clear_btn.state(
+            ["!disabled"] if (n or self.plan or self.plan_error) else ["disabled"]
+        )
+
+        self.snap_val_lbl.configure(text=f"{self.snap_radius_m} m")
+        self.arrow_val_lbl.configure(text=f"{self.arrow_spacing_m} m")
+
+        self.mileage_title.configure(
+            text=f"Distance ({n} points)" if n else "Distance"
+        )
+        self._clear_leg_rows()
+        if self.plan is not None:
+            for i, leg in enumerate(self.plan.legs):
+                self._set_leg_row(i, f"{i + 1}→{i + 2}", fmt_len(leg.total_m))
         else:
-            self.coord_lbls["C"].configure(text="—")
-            self.coord_lbls["D"].configure(text="—")
-            values = ("—", "—", "—")
-        for i in range(3):
-            self.mile_name_lbls[i].configure(text=names[i])
-            self.mile_val_lbls[i].configure(text=values[i])
-        for i in range(3, 6):
-            self.mile_name_lbls[i].grid_remove()
-            self.mile_val_lbls[i].grid_remove()
+            for i in range(max(0, n - 1)):
+                self._set_leg_row(i, f"{i + 1}→{i + 2}", "—")
 
         self.hint_lbl.configure(
-            text="Left-click to pick · Drag outside fence to pan · Wheel to zoom · Ctrl+Z undo"
-        )
-        if not self.hint_lbl.winfo_manager():
-            self.hint_lbl.pack(side="bottom", anchor="w",
-                               padx=self.px(18), pady=self.px(12))
-        self.action_btn.configure(text="Undo", command=self.undo)
-        self.action_btn.state(["!disabled"] if self.points else ["disabled"])
-        self.clear_btn.state(
-            ["!disabled"] if (self.points or self.result or self.error) else ["disabled"]
+            text=("Click to add points · Start or Enter to plan · "
+                  "Wheel to zoom · Drag outside fence to pan")
         )
 
-    def _sync_run_side(self) -> None:
-        self.hint_lbl.pack_forget()
-        keep = self.immersive.get()
+    def _sync_immersive_side(self) -> None:
         run = self.run
-        is_immersive = run is not None and run.kind == "immersive"
-
-        self.run_desc_lbl.configure(
-            text=("Pick a start, then reveal five checkpoints one at a time." if keep
-                  else "Five ordered waypoints appear on roads; numbers show the order.")
-        )
-
         if self.run_error:
             status, color = self.run_error, "#b3261e"
-        elif is_immersive:
-            status, color = self._immersive_status(run), C_STATUS_FG
-        elif keep and run is None:
+        elif run is None:
             status, color = (
-                "Immersive: click the map to choose a start point (not a checkpoint).", C_STATUS_FG
+                "Immersive: click the map to choose a start point (not a checkpoint).",
+                C_STATUS_FG,
             )
         else:
-            status, color = self._normal_run_status(run), C_STATUS_FG
+            status, color = self._immersive_status(run), C_STATUS_FG
         self.status_lbl.configure(text=status, fg=color)
 
-        if is_immersive:
-            self._sync_immersive_mileage(run)
-        else:
-            self._sync_normal_mileage(run)
+        active = run is not None or self.run_error or self.immersive_session is not None
+        self.action_btn.configure(text="New start", command=self._restart_immersive)
+        self.action_btn.state(["!disabled"] if active else ["disabled"])
 
-        if keep:
-            self.action_btn.configure(
-                text="New start", command=self._restart_immersive
-            )
-            self.action_btn.state(["!disabled"])
-            self.clear_btn.state(
-                ["!disabled"]
-                if (run is not None or self.run_error
-                    or self.immersive_session is not None)
-                else ["disabled"]
-            )
-            self.hint_lbl.configure(
-                text=("Click the map to choose a start · Drag outside fence to pan"
-                      if run is None
-                      else "Press Play to run · Drag outside fence to pan")
-            )
-        else:
-            self.action_btn.configure(text="Refresh", command=self._generate_run)
-            self.action_btn.state(["!disabled"])
-            self.clear_btn.state(
-                ["!disabled"] if (run is not None or self.run_error)
-                else ["disabled"]
-            )
-            self.hint_lbl.configure(
-                text="Numbers show the order · Drag outside fence to pan · Refresh to randomize"
-            )
+        self._sync_immersive_mileage(run)
 
-    def _normal_run_status(self, run: PointRun | None) -> str:
-        if run is None:
-            return "Scoring run: press Refresh to generate five ordered road points."
-        gender = "Male" if self.gender == "male" else "Female"
-        base_m = sum(run.leg_m)
-        if run.limit_state == "over":
-            status = (f"Checkpoint legs {fmt_len(base_m)} exceed the daily cap "
-                      f"{fmt_len(run.cap_m)} ({gender}).")
-        elif run.limit_state == "transit":
-            status = (f"After the checkpoints, the cap {fmt_len(run.cap_m)} "
-                      f"is reached on the way to the track ({gender}).")
-        elif run.limit_state == "track":
-            status = (f"After the checkpoints, {fmt_len(run.track_m)} on the track, "
-                      f"total {fmt_len(run.total_m)} ({gender}, cap "
-                      f"{fmt_len(run.cap_m)}).")
-        elif run.limit_state == "no_track":
-            status = "No running track found; no extension added."
-        else:
-            status = (f"Five ordered road points generated, running 1→2→3→4→5; "
-                      f"total {fmt_len(run.total_m)}.")
-        if self.reduce_backtrack.get():
-            status += " Reduce backtracking is on."
-            fallback = any(leg.avoid_fallback for leg in run.legs)
-            if run.transit_leg is not None and run.transit_leg.avoid_fallback:
-                fallback = True
-            if fallback:
-                status += " (some legs had no alternative; exclusion dropped)"
-        if run.areas_used:
-            names = ", ".join(
-                self.cmap.areas[i].desc for i in sorted(run.areas_used)
-            )
-            status += f" Highlighted {names} (freely traversable)."
-        return status
+        self.hint_lbl.configure(
+            text=("Click the map for the start · Wheel to zoom · "
+                  "Drag outside fence to pan"
+                  if run is None
+                  else "Press Play to run · Green line is the live trajectory · "
+                       "Wheel to zoom")
+        )
 
     def _immersive_status(self, run: PointRun) -> str:
         gender = "Male" if self.gender == "male" else "Female"
@@ -1238,75 +1370,30 @@ class CampusNavApp(MapDrawingMixin):
             status += f" Highlighted {names}."
         return status
 
-    def _sync_normal_mileage(self, run: PointRun | None) -> None:
-        cap_rows = run is not None and run.limit_state in ("transit", "track")
-        self.mileage_title.configure(
-            text="Distance (run + cap)" if cap_rows else "Distance (ordered run)"
-        )
-        if run:
-            for i in range(4):
-                self.mile_name_lbls[i].configure(text=f"{i + 1}→{i + 2}")
-                self.mile_val_lbls[i].configure(text=fmt_len(run.leg_m[i]))
-                self.mile_name_lbls[i].grid()
-                self.mile_val_lbls[i].grid()
-            if cap_rows:
-                self.mile_name_lbls[4].configure(text="5→Track + laps")
-                self.mile_val_lbls[4].configure(
-                    text=(f"{fmt_len(run.transit_m)} + "
-                          f"{fmt_len(run.track_m)}")
-                )
-                self.mile_name_lbls[4].grid()
-                self.mile_val_lbls[4].grid()
-            else:
-                self.mile_name_lbls[4].grid_remove()
-                self.mile_val_lbls[4].grid_remove()
-            self.mile_name_lbls[5].grid_remove()
-            self.mile_val_lbls[5].grid_remove()
-        else:
-            for i in range(4):
-                self.mile_name_lbls[i].configure(text=f"{i + 1}→{i + 2}")
-                self.mile_val_lbls[i].configure(text="—")
-                self.mile_name_lbls[i].grid()
-                self.mile_val_lbls[i].grid()
-            for i in (4, 5):
-                self.mile_name_lbls[i].grid_remove()
-                self.mile_val_lbls[i].grid_remove()
-
     def _sync_immersive_mileage(self, run: PointRun | None) -> None:
         if run is None:
             self.mileage_title.configure(text="Distance (immersive)")
-            self.mile_name_lbls[0].configure(text="Start→1")
-            self.mile_val_lbls[0].configure(text="—")
-            self.mile_name_lbls[0].grid()
-            self.mile_val_lbls[0].grid()
-            for i in range(1, 6):
-                self.mile_name_lbls[i].grid_remove()
-                self.mile_val_lbls[i].grid_remove()
+            self._clear_leg_rows()
+            self._set_leg_row(0, "Start→1", "—")
             return
 
         cap_rows = run.limit_state in ("transit", "track")
         self.mileage_title.configure(
             text="Distance (immersive + cap)" if cap_rows else "Distance (immersive)"
         )
-        for i in range(6):
-            if i < len(run.legs):
-                self.mile_name_lbls[i].configure(
-                    text="Start→1" if i == 0 else f"{i}→{i + 1}"
-                )
-                self.mile_val_lbls[i].configure(text=fmt_len(run.leg_m[i]))
-                self.mile_name_lbls[i].grid()
-                self.mile_val_lbls[i].grid()
-            elif i == 5 and cap_rows:
-                self.mile_name_lbls[i].configure(text="5→Track + laps")
-                self.mile_val_lbls[i].configure(
-                    text=(f"{fmt_len(run.transit_m)} + "
-                          f"{fmt_len(run.track_m)}")
-                )
-                self.mile_name_lbls[i].grid()
-                self.mile_val_lbls[i].grid()
-            else:
-                self.mile_name_lbls[i].grid_remove()
-                self.mile_val_lbls[i].grid_remove()
+        self._clear_leg_rows()
+        row = 0
+        for i in range(len(run.legs)):
+            self._set_leg_row(
+                row, "Start→1" if i == 0 else f"{i}→{i + 1}",
+                fmt_len(run.leg_m[i]),
+            )
+            row += 1
+        if cap_rows and row < len(self.leg_name_lbls):
+            self._set_leg_row(
+                row, "5→Track + laps",
+                f"{fmt_len(run.transit_m)} + {fmt_len(run.track_m)}",
+            )
 
     # ---- Mode switching --------------------------------------------------
     def _update_mode_buttons(self) -> None:
@@ -1321,118 +1408,24 @@ class CampusNavApp(MapDrawingMixin):
             )
 
     def _set_mode(self, mode: str) -> None:
-        if mode not in ("point", "run") or mode == self.mode:
+        if mode not in ("route", "immersive") or mode == self.mode:
             return
         self.mode = mode
         self._stop_animation()
         self._sim_time = 0.0
         self._update_mode_buttons()
-        if mode == "run":
-            self.point_box.pack_forget()
-            self.run_box.pack(fill="x")
-            self.canvas.configure(cursor=self._run_cursor())
-            if self.run is None:
-                if self.immersive.get():
-                    self._on_route_changed()
-                    self._sync_side()
-                    self._fit_view()
-                    return
-                self._generate_run()
-                return
-        else:
-            self.run_box.pack_forget()
-            self.point_box.pack(fill="x")
-            self.canvas.configure(cursor="crosshair")
-        self._on_route_changed()
-        self._sync_side()
-        self._fit_view()
-
-    def _on_immersive_toggle(self) -> None:
-        if self.mode != "run":
-            return
-        self._stop_animation()
-        self._sim_time = 0.0
-        self.immersive_session = None
-        self.run = None
-        self.run_error = None
-        if self.immersive.get():
-            self.canvas.configure(cursor="crosshair")
-            self._on_route_changed()
-            self._sync_side()
-            self._redraw()
-        else:
-            self.canvas.configure(cursor="arrow")
-            self._generate_run()
-
-    def _generate_run(self) -> None:
-        if self.mode != "run" or self.immersive.get():
-            return
-        self._stop_animation()
-        self._sim_time = 0.0
-        self.immersive_session = None
-        self.run_error = None
-        try:
-            run = self.cmap.plan_point_run(
-                5, min_sep_m=60.0,
-                reduce_backtrack=self.reduce_backtrack.get(),
-                run_limit=self.run_limit.get(),
-                daily_cap_m=self._daily_cap_m(),
-            )
-        except Exception as exc:
-            run = None
-            self.run_error = f"Generation failed: {exc}"
-        self.run = run
-        if run is None and not self.run_error:
-            self.run_error = "Could not generate a scoring run. Please try again."
-        elif run is not None:
-            self._stroll_seed = random.randrange(1, 1 << 31)
-        self._on_route_changed()
-        self._sync_side()
-        self._fit_view()
-
-    def _replan_run(self) -> None:
-        if self.mode != "run" or self.run is None:
-            return
-        if self.run.kind == "immersive":
-            return
-        # Reuse the current five points and only replan with the new options.
-        try:
-            run = self.cmap.plan_point_run(
-                points=self.run.points_lonlat,
-                reduce_backtrack=self.reduce_backtrack.get(),
-                run_limit=self.run_limit.get(),
-                daily_cap_m=self._daily_cap_m(),
-            )
-        except Exception as exc:
-            run = None
-            self.run_error = f"Replanning failed: {exc}"
-        if run is None:
-            self.run = None
-            if not self.run_error:
-                self.run_error = "Could not replan with the current settings. Refresh the five points."
-            self._on_route_changed()
-            self._sync_side()
-            self._redraw()
-            return
-        self.run = run
-        self.run_error = None
-        self._stroll_seed = random.randrange(1, 1 << 31)
+        self.canvas.configure(cursor=self._mode_cursor())
         self._on_route_changed()
         self._sync_side()
         self._redraw()
 
+    # ---- Immersive options ----------------------------------------------
     def _on_reduce_backtrack_toggle(self) -> None:
-        if self.mode != "run":
+        if self.mode != "immersive":
             return
-        if self.run is not None and self.run.kind == "immersive":
-            if self.immersive_session is not None:
-                self.immersive_session.reduce_backtrack = (
-                    self.reduce_backtrack.get()
-                )
-            self._sync_run_side()
-            return
-        if self.run is not None:
-            self._replan_run()
+        if self.immersive_session is not None:
+            self.immersive_session.reduce_backtrack = self.reduce_backtrack.get()
+        self._sync_side()
 
     def _daily_cap_m(self) -> float:
         return 8000.0 if self.gender == "male" else 5000.0
@@ -1454,26 +1447,16 @@ class CampusNavApp(MapDrawingMixin):
             return
         self.gender = gender
         self._update_gender_buttons()
-        if self.mode != "run":
+        if self.mode != "immersive":
             return
-        if self.run is not None and self.run.kind == "immersive":
-            if self.immersive_session is not None:
-                self.immersive_session.daily_cap_m = self._daily_cap_m()
-            self._sync_run_side()
-            return
-        if self.run is not None and self.run_limit.get():
-            self._replan_run()
-        else:
-            self._sync_run_side()
+        if self.immersive_session is not None:
+            self.immersive_session.daily_cap_m = self._daily_cap_m()
+        self._sync_side()
 
     def _on_run_limit_toggle(self) -> None:
-        if self.mode != "run":
+        if self.mode != "immersive":
             return
-        if self.run is not None and self.run.kind == "immersive":
-            if self.immersive_session is not None:
-                self.immersive_session.run_limit = self.run_limit.get()
-                self.immersive_session.daily_cap_m = self._daily_cap_m()
-            self._sync_run_side()
-            return
-        if self.run is not None:
-            self._replan_run()
+        if self.immersive_session is not None:
+            self.immersive_session.run_limit = self.run_limit.get()
+            self.immersive_session.daily_cap_m = self._daily_cap_m()
+        self._sync_side()

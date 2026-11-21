@@ -55,6 +55,8 @@ class RouteResult:
     used_dirs: frozenset[tuple[int, bool]] = frozenset()
     last_dir: tuple[int, bool] | None = None
     avoid_fallback: bool = False
+    snap_a: bool = False        # A was close enough to its road: no connector
+    snap_b: bool = False
 
 
 @dataclass(slots=True)

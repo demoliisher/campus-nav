@@ -1,24 +1,66 @@
 # campus-nav
 
 A desktop demo for **GDPU ZS** navigation. It is built with Python and tkinter,
-loads campus road and fence GeoJSON data, and lets you pick points on the map,
-compute the shortest route, inspect distances, and watch a simulated scoring
-run with pace playback.
+loads campus road and fence GeoJSON data, and lets you plan multi-point routes
+on the map, inspect distances, and watch an immersive scoring run with a live
+green trajectory and pace playback.
 
 The UI uses GCJ-02 coordinates throughout.
 
 ## Interface preview
 
-![Immersive simulation](docs/immersive.png)
+Route planning mode: numbered points, the planned route, and direction arrows.
+
+![Route planning](docs/route.png)
 
 ## Features
 
-- **Two-point routing**: left-click to select points A and B (undoable). Each
-  point is projected orthogonally onto the nearest road, producing C and D.
-  The temporary links AC and BD connect the points to the network, and
-  Dijkstra finds the shortest C -> D route. The full route is highlighted.
-- **Distance breakdown**: total distance = temporary link AC + campus route
-  C -> D + temporary link D -> B, shown item by item in the sidebar.
+The window has two modes.
+
+### Route planning
+
+- **Multi-point planning**: left-click the map to add ordered points (2 to 15
+  points; Undo removes the last one, Clear removes all). Press the **Start**
+  button or the **Enter** key to plan the whole sequence with Dijkstra. Every
+  point is projected orthogonally onto its nearest road; a point farther than
+  the snap radius gets an orange dashed connector, while a point within it
+  joins the road directly with no connector and no extra distance.
+- **Random 5**: generates five ordered road points, plans them immediately, and
+  fits the view. Custom points can be added on top of that sequence.
+- **Snap radius**: a slider from 0 to 60 m (default 25 m) controls how close a
+  point must be to count as already on the road.
+- **Direction arrows**: route planning has no playback. Instead, white
+  direction arrows repeat along the planned route at a spacing chosen with a
+  slider from 20 to 200 m (default 100 m).
+- **Distance breakdown**: the sidebar lists the distance of each leg
+  (1 -> 2, 2 -> 3, ...) plus the total.
+
+### Immersive simulation
+
+- **Live playback**: pick a start point on the map (not a checkpoint). The app
+  connects it to the nearest road and reveals checkpoint 1; each further
+  checkpoint is generated only after the current one is reached. The planned
+  route is deliberately **not drawn**, so the green line shows only the
+  real-time trajectory actually covered; the moving pace arrow marks the
+  current position.
+- **Pace**: a slider from 0'05'' to 10'00'' per kilometer (default 5'00'').
+  Press Play/Pause; the large readout is the **distance already walked from the
+  start**, while the small line keeps the total.
+- **Reduce backtracking**: avoids an immediate 180-degree reversal at a
+  checkpoint by excluding the reverse of the last edge; if that leaves no
+  route, the exclusion is dropped automatically.
+- **Daily cap extension**: after the five checkpoints, the route heads for the
+  running track and continues counterclockwise until the daily cap is reached
+  (8 km for male, 5 km for female, male by default).
+- **Stroll**: every road and ring is treated as a centerline with a uniform
+  10 m width. The moving arrow keeps to the right side, may wander inside that
+  lane, and returns to the centerline near sharp turns and checkpoints. The
+  location interval (1-10 s) and maximum heading noise (0 to +/-5 degrees) are
+  adjustable. The full wander path is generated before playback starts, so the
+  arrow never pauses to search for the next target.
+
+### Both modes
+
 - **Polygon semantics**:
   - `traverse: "area"`: the interior is freely traversable and the whole area
     is highlighted when crossed.
@@ -29,35 +71,10 @@ The UI uses GCJ-02 coordinates throughout.
   (`traverse: "fence"`) and draws it at the bottom of the map with a pale
   green fill and a green dashed boundary. The initial view fits the roads and
   the fence together.
-- **Map interaction**: click inside the fence to pick points; left-drag outside
-  the fence to pan the map. The wider right sidebar scrolls vertically when
-  the scoring-run options exceed the window height.
-- **Pace playback**: adjust the pace with a slider from 0'05'' to 10'00'' per
-  kilometer (default 5'00''). Press Play to move a directional arrow at the
-  real pace; drag the slider to its minimum for a quick preview. The large
-  mileage readout shows the **distance already walked from the start**, while
-  the small line below keeps the full route distance.
-- **Simulated scoring run**: generates five ordered waypoints on roads and
-  plans the route 1 -> 2 -> 3 -> 4 -> 5.
-  - **Immersive simulation**: select a start point on the map (not a
-    checkpoint). The app connects it to the nearest road and immediately
-    reveals checkpoint 1; each further checkpoint is generated only after the
-    current one is reached. During playback, reaching a target reveals the
-    next leg automatically.
-  - **Reduce backtracking**: avoids an immediate 180-degree reversal at a
-    checkpoint by excluding the reverse of the last edge; if that leaves no
-    route, the exclusion is dropped automatically.
-  - **Daily cap extension**: after the five checkpoints, the route heads for
-    the running track and continues counterclockwise until the daily cap is
-    reached (8 km for male, 5 km for female, male by default). It can be
-    combined freely with reduce backtracking.
-  - **Stroll** (playback only): every road and ring is treated as a centerline
-    with a uniform 10 m width. The moving arrow keeps to the right side, may
-    wander inside that lane, and returns to the centerline near sharp turns and
-    checkpoints. The location interval (1-10 s) and maximum heading noise
-    (0 to +/-5 degrees) are adjustable. The full wander path is generated
-    before playback starts, so the arrow never pauses to search for the next
-    target.
+- **Map interaction**: click inside the fence to add or pick points; left-drag
+  outside the fence to pan the map. The wider right sidebar scrolls vertically
+  when its options exceed the window height. The mouse wheel scrolls the
+  sidebar and never changes a slider value.
 
 ## Requirements
 
@@ -94,7 +111,7 @@ campus-nav/
 ├── uv.lock
 ├── README.md
 ├── docs/
-│   └── immersive.png            # immersive simulation preview
+│   └── route.png                # route-planning preview
 ├── scripts/
 │   └── build_gcj02_data.py      # WGS-84 roads / BD-09 fence -> GCJ-02
 ├── src/
@@ -171,8 +188,10 @@ uv run python scripts/build_gcj02_data.py
    the datum (roads from WGS-84, fence from BD-09).
 2. Merge duplicate vertices within a tolerance and build an undirected graph
    from all lines and rings; rings with `run_direction` get one-way edges.
-3. When selecting points, project A and B onto the nearest road at C and D,
-   then split the original edge by inserting virtual nodes.
+3. When planning, project each selected point onto the nearest road, split the
+   original edge by inserting virtual nodes, and chain the legs in order. When
+   the projection distance is within the snap radius, no connector is added to
+   the distance or drawn.
 4. For `area` polygons, precompute visibility chords between boundary vertices
    so the router can cross the interior and record the whole area for
    highlighting.
@@ -187,6 +206,10 @@ uv run python scripts/build_gcj02_data.py
    heading, clamps the lateral offset to the right half of the 10 m road, and
    pulls the path back to the centerline at corners and checkpoints. The
    sequence is precomputed; the animation only interpolates it.
+8. Route-planning direction arrows are sampled every N meters along the
+   planned polyline, taking the unit tangent of the segment they fall on. The
+   sampler is independent of the graph, so arrow density can change without
+   replanning.
 
 ## Development and testing
 
@@ -196,7 +219,7 @@ uv run pytest
 uv run campus-nav --check
 ```
 
-`test_self_check_passes` in `uv run pytest` runs the same 49 checks as
+`test_self_check_passes` in `uv run pytest` runs the same 52 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
-alignment, stroll-path bounds, geometry helpers, routing, and scoring-run
-behavior.
+alignment, stroll-path bounds, arrow sampling, snap radius, geometry helpers,
+routing, and scoring-run behavior.

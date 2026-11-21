@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 
+from .geo.paths import sample_polyline
 from .pacing import fmt_duration, parse_pace
 from .routing.campus_map import CampusMap
 from .routing.immersive import ImmersiveSession
@@ -53,6 +54,33 @@ def run_check(cmap: CampusMap) -> bool:
         check("Total distance = AC + CD + DB",
               abs(r.total_m - (r.ac_m + r.net_m + r.bd_m)) < 1e-9,
               f"{r.total_m:.2f} m")
+
+    # 1b) Snap radius: a point close to a road joins it without a connector.
+    line_eids = [i for i, e in enumerate(cmap.edges)
+                 if e.kind == "line" and e.length > 60.0]
+    if line_eids:
+        eid = max(line_eids, key=lambda i: cmap.edges[i].length)
+        e = cmap.edges[eid]
+        ax, ay = cmap.coords[e.u]
+        bx, by = cmap.coords[e.v]
+        nx, ny = -(by - ay) / e.length, (bx - ax) / e.length
+        off = (((ax + bx) / 2.0) + nx * 30.0, ((ay + by) / 2.0) + ny * 30.0)
+        snap_proj = cmap.nearest_projection(*off)
+        snapped = cmap.shortest_route(
+            off, snap_proj.foot, snap_radius=snap_proj.dist + 1.0
+        )
+        kept = cmap.shortest_route(
+            off, snap_proj.foot, snap_radius=max(0.0, snap_proj.dist - 5.0)
+        )
+        check("Snap radius removes a short connector",
+              snapped is not None and snapped.snap_a and snapped.ac_m == 0.0,
+              f"offset {snap_proj.dist:.1f} m")
+        check("Beyond the snap radius the connector remains",
+              kept is not None and not kept.snap_a and kept.ac_m > 0.0)
+
+    check("Direction arrows repeat at the requested spacing",
+          [p for p, _t in sample_polyline([(0.0, 0.0), (250.0, 0.0)], 100.0)]
+          == [(100.0, 0.0), (200.0, 0.0)])
 
     # 2) Area: a point inside the plaza projects to a boundary, and the plaza
     #    can be crossed through an interior chord.

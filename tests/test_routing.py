@@ -42,6 +42,25 @@ def test_shortest_route_cross_campus(cmap):
     assert 100.0 < route.total_m < 5000.0
 
 
+def test_snap_radius_suppresses_short_connector(cmap):
+    along = cmap.proj.xy(113.41513, 22.47796)
+    edge = cmap.edges[cmap.nearest_projection(*along).edge_id]
+    ax, ay = cmap.coords[edge.u]
+    bx, by = cmap.coords[edge.v]
+    length = math.dist((ax, ay), (bx, by))
+    nx, ny = -(by - ay) / length, (bx - ax) / length
+    off = (((ax + bx) / 2.0) + nx * 30.0, ((ay + by) / 2.0) + ny * 30.0)
+
+    proj = cmap.nearest_projection(*off)
+    snapped = cmap.shortest_route(off, proj.foot, snap_radius=proj.dist + 1.0)
+    kept = cmap.shortest_route(off, proj.foot, snap_radius=proj.dist - 5.0)
+
+    assert snapped is not None and snapped.snap_a
+    assert snapped.ac_m == 0.0
+    assert kept is not None and not kept.snap_a
+    assert kept.ac_m == pytest.approx(proj.dist)
+
+
 def test_point_run(cmap):
     run = cmap.plan_point_run(5, min_sep_m=40.0, rng=random.Random(20261120))
     assert run is not None

@@ -17,6 +17,7 @@ C_STATUS_FG = "#1c3d5a"
 C_AREA_ACTIVE = "#b7d4f4"
 C_AREA_ACTIVE_LINE = "#5b9bd5"
 C_PACE = "#8e24aa"          # pace arrow / progress bar
+C_TRAIL = "#1b9e5a"         # immersive live trajectory
 C_FENCE = "#2e9e63"         # campus fence boundary
 C_FENCE_FILL = "#dcefe2"    # pale fill inside the fence
 

@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--demo",
         metavar="LON1,LAT1,LON2,LAT2",
-        help="place points A and B automatically at startup (demo/screenshots)",
+        help="plan a route through the given points at startup (demo/screenshots)",
     )
     return parser
 

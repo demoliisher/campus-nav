@@ -11,14 +11,13 @@ import math
 import tkinter as tk
 
 from ..formatting import fmt_len
-from ..geo.paths import polyline_midpoint
-from ..routing.models import PointRun, RouteResult
+from ..geo.paths import polyline_midpoint, sample_polyline, truncate_path
+from ..routing.models import PointRun
 from .theme import (
     AREA_COLORS,
     C_A,
     C_AREA_ACTIVE,
     C_AREA_ACTIVE_LINE,
-    C_B,
     C_BG,
     C_FENCE,
     C_FENCE_FILL,
@@ -27,6 +26,7 @@ from .theme import (
     C_ROAD_CASING,
     C_ROUTE,
     C_TEMP,
+    C_TRAIL,
     FONT_MONO,
     FONT_UI,
 )
@@ -89,16 +89,13 @@ class MapDrawingMixin:
         if self.show_labels.get():
             self._draw_road_labels()
         self._draw_fence_labels()
-        if self.mode == "point":
-            if self.result:
-                self._draw_route(self.result)
-            self._draw_points()
-        else:
+        if self.mode == "route":
+            if self.plan:
+                self._draw_plan(self.plan)
+            self._draw_picked_points()
+        elif self.mode == "immersive":
             if self.run:
-                if self.run.kind == "immersive":
-                    self._draw_immersive(self.run)
-                else:
-                    self._draw_run(self.run)
+                self._draw_immersive(self.run)
         self._draw_pace_marker()
         self._draw_scalebar()
         self._draw_north()
@@ -173,26 +170,20 @@ class MapDrawingMixin:
                     font=(FONT_UI, 8), pad=(3, 1),
                 )
 
-    def _draw_route(self, r: RouteResult) -> None:
+    def _draw_plan(self, plan: PointRun) -> None:
         c = self.canvas
 
-        # Temporary links AC and BD: orange dashed lines (white underlay keeps them readable).
-        for p, q in ((r.a_xy, r.c_xy), (r.d_xy, r.b_xy)):
-            if math.dist(p, q) < 0.05:
-                continue
-            coords = (*self._s(p), *self._s(q))
-            c.create_line(
-                *coords, fill="#ffffff", width=self.pxf(7),
-                dash=(7, 4), capstyle=tk.ROUND,
-            )
-            c.create_line(
-                *coords, fill=C_TEMP, width=self.pxf(3.5),
-                dash=(7, 4), capstyle=tk.ROUND,
-            )
+        # Temporary connectors stay orange and dashed; points within the snap
+        # radius join the road directly and need no connector at all.
+        for leg in plan.legs:
+            if not leg.snap_a and math.dist(leg.a_xy, leg.c_xy) >= 0.05:
+                self._draw_connector(leg.a_xy, leg.c_xy)
+            if not leg.snap_b and math.dist(leg.b_xy, leg.d_xy) >= 0.05:
+                self._draw_connector(leg.b_xy, leg.d_xy)
 
-        # Shortest campus route C -> D
-        if len(r.path) >= 2:
-            coords = self._flat(r.path)
+        # Planned route along the road centerlines.
+        if len(plan.path) >= 2:
+            coords = self._flat(plan.path)
             c.create_line(
                 *coords, fill="#ffffff", width=self.pxf(11),
                 capstyle=tk.ROUND, joinstyle=tk.ROUND,
@@ -202,94 +193,102 @@ class MapDrawingMixin:
                 capstyle=tk.ROUND, joinstyle=tk.ROUND,
             )
 
-        # C、D
-        rad = self.pxf(5)
-        for p, label in ((r.c_xy, "C"), (r.d_xy, "D")):
-            px, py = self._s(p)
-            c.create_oval(px - rad, py - rad, px + rad, py + rad,
-                          fill="#ffffff", outline=C_ROUTE, width=self.pxf(2))
-            self._text_bg(px + self.px(11), py + self.px(11), label,
-                          fg=C_ROUTE, bg="#ffffff",
-                          font=(FONT_UI, 9, "bold"), pad=(3, 1))
+        # Direction reference: arrows at regular spacing along the route.
+        for pos, tangent in sample_polyline(plan.path, self.arrow_spacing_m):
+            self._draw_direction_arrow(pos, tangent)
 
-        # Distance badge
-        mid = polyline_midpoint([r.a_xy] + r.path + [r.b_xy])
+        mid = polyline_midpoint(plan.path)
         px, py = self._s(mid)
-        self._badge_at(px, py, fmt_len(r.total_m))
+        self._badge_at(px, py, fmt_len(plan.total_m))
 
-    def _draw_run(self, run: PointRun) -> None:
+        # Numbered route points.
+        for idx, p in enumerate(plan.points_xy, 1):
+            self._number_marker(p, idx)
+
+    def _draw_connector(self, p: tuple[float, float],
+                        q: tuple[float, float]) -> None:
+        coords = (*self._s(p), *self._s(q))
+        self.canvas.create_line(
+            *coords, fill="#ffffff", width=self.pxf(7),
+            dash=(7, 4), capstyle=tk.ROUND,
+        )
+        self.canvas.create_line(
+            *coords, fill=C_TEMP, width=self.pxf(3.5),
+            dash=(7, 4), capstyle=tk.ROUND,
+        )
+
+    def _draw_direction_arrow(self, pos: tuple[float, float],
+                              tangent: tuple[float, float]) -> None:
+        sx, sy = self._s(pos)
+        dx, dy = tangent[0], -tangent[1]
+        px, py = -dy, dx
+        size = self.pxf(5.2)
+        tip = (sx + dx * size * 1.5, sy + dy * size * 1.5)
+        back = (sx - dx * size * 0.75, sy - dy * size * 0.75)
+        left = (back[0] + px * size * 0.8, back[1] + py * size * 0.8)
+        right = (back[0] - px * size * 0.8, back[1] - py * size * 0.8)
+        self.canvas.create_polygon(
+            tip[0], tip[1], left[0], left[1], right[0], right[1],
+            fill="#ffffff", outline=C_ROUTE, width=self.pxf(1.2),
+        )
+
+    def _draw_picked_points(self) -> None:
+        for idx, pt in enumerate(self.points, 1):
+            self._number_marker(self.cmap.proj.xy(*pt), idx)
+
+    def _number_marker(self, p: tuple[float, float], number: int,
+                       *, filled: bool = False, halo: bool = False) -> None:
         c = self.canvas
-        if len(run.path) >= 2:
-            coords = self._flat(run.path)
-            c.create_line(
-                *coords, fill="#ffffff", width=self.pxf(11),
-                capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
-            c.create_line(
-                *coords, fill=C_ROUTE, width=self.pxf(6),
-                capstyle=tk.ROUND, joinstyle=tk.ROUND,
-            )
-
-        # Place the distance badge below the numbered points so it does not
-        # cover the numbers.
-        mid = polyline_midpoint(run.path)
-        px, py = self._s(mid)
-        self._badge_at(px, py, fmt_len(run.total_m))
-
-        # Numbers show the order.
-        for idx, p in enumerate(run.points_xy, 1):
-            px, py = self._s(p)
-            outer = self.pxf(14)
-            inner = self.pxf(11.5)
-            c.create_oval(px - outer, py - outer, px + outer, py + outer,
-                          fill="#ffffff", outline="", tags="endpoint")
+        px, py = self._s(p)
+        outer = self.pxf(14)
+        inner = self.pxf(11.5)
+        c.create_oval(px - outer, py - outer, px + outer, py + outer,
+                      fill="#ffffff", outline="", tags="endpoint")
+        if halo:
+            halo_r = outer + self.pxf(3)
+            c.create_oval(px - halo_r, py - halo_r, px + halo_r, py + halo_r,
+                          outline=C_TEMP, width=self.pxf(1),
+                          dash=(2, 3), tags="endpoint")
+        if filled:
+            c.create_oval(px - inner, py - inner, px + inner, py + inner,
+                          fill=C_TEMP, outline="#ffffff",
+                          width=self.pxf(2.5), tags="endpoint")
+            c.create_text(px, py, text=str(number), fill="#ffffff",
+                          font=(FONT_UI, 9, "bold"), tags="endpoint")
+        else:
             c.create_oval(px - inner, py - inner, px + inner, py + inner,
                           fill="#ffffff", outline=C_TEMP,
                           width=self.pxf(2.5), tags="endpoint")
-            c.create_text(px, py, text=str(idx), fill=C_TEMP,
+            c.create_text(px, py, text=str(number), fill=C_TEMP,
                           font=(FONT_UI, 9, "bold"), tags="endpoint")
+
+    def _trail_points(self) -> list[tuple[float, float]]:
+        """Real-time trajectory: the precomputed path up to the current time."""
+        if (not self._anim_pts or self._anim_total <= 0.0
+                or self._anim_total_time <= 0.0):
+            return []
+        frac = min(1.0, max(0.0, self._sim_time / self._anim_total_time))
+        return truncate_path(self._anim_pts, frac * self._anim_total)
 
     def _draw_immersive(self, run: PointRun) -> None:
         c = self.canvas
-        start = run.start_xy
 
-        # Temporary connector from the start to the nearest road.
-        if start is not None and run.legs:
-            c_xy = run.legs[0].c_xy
-            if math.dist(start, c_xy) >= 0.05:
-                coords = (*self._s(start), *self._s(c_xy))
-                c.create_line(
-                    *coords, fill="#ffffff", width=self.pxf(7),
-                    dash=(7, 4), capstyle=tk.ROUND,
-                )
-                c.create_line(
-                    *coords, fill=C_TEMP, width=self.pxf(3.5),
-                    dash=(7, 4), capstyle=tk.ROUND,
-                )
-
-        # Revealed route: if the start is far from a road, the blue route
-        # begins at the projection point.
-        road_path = run.path
-        if (start is not None and run.legs
-                and math.dist(start, run.legs[0].c_xy) >= 1.0
-                and len(road_path) >= 2):
-            road_path = road_path[1:]
-        if len(road_path) >= 2:
-            coords = self._flat(road_path)
+        # The planned route stays hidden; only the green live trajectory is
+        # drawn, so the actual movement is easy to observe.
+        trail = self._trail_points()
+        if len(trail) >= 2:
+            coords = self._flat(trail)
             c.create_line(
-                *coords, fill="#ffffff", width=self.pxf(11),
+                *coords, fill="#ffffff", width=self.pxf(9),
                 capstyle=tk.ROUND, joinstyle=tk.ROUND,
             )
             c.create_line(
-                *coords, fill=C_ROUTE, width=self.pxf(6),
+                *coords, fill=C_TRAIL, width=self.pxf(5),
                 capstyle=tk.ROUND, joinstyle=tk.ROUND,
             )
-
-        mid = polyline_midpoint(run.path)
-        px, py = self._s(mid)
-        self._badge_at(px, py, fmt_len(run.total_m))
 
         # Start point
+        start = run.start_xy
         if start is not None:
             px, py = self._s(start)
             outer = self.pxf(8.5)
@@ -307,47 +306,11 @@ class MapDrawingMixin:
         # Revealed checkpoints: completed ones are filled; the current target is outlined.
         last = len(run.points_xy) - 1
         for idx, p in enumerate(run.points_xy):
-            px, py = self._s(p)
-            number = str(idx + 1)
-            outer = self.pxf(14)
-            inner = self.pxf(11.5)
-            c.create_oval(px - outer, py - outer, px + outer, py + outer,
-                          fill="#ffffff", outline="", tags="endpoint")
-            if idx < run.completed:
-                c.create_oval(px - inner, py - inner, px + inner, py + inner,
-                              fill=C_TEMP, outline="#ffffff",
-                              width=self.pxf(2.5), tags="endpoint")
-                c.create_text(px, py, text=number, fill="#ffffff",
-                              font=(FONT_UI, 9, "bold"), tags="endpoint")
-            else:
-                c.create_oval(px - inner, py - inner, px + inner, py + inner,
-                              fill="#ffffff", outline=C_TEMP,
-                              width=self.pxf(2.5), tags="endpoint")
-                c.create_text(px, py, text=number, fill=C_TEMP,
-                              font=(FONT_UI, 9, "bold"), tags="endpoint")
-            if idx == last and not run.finished:
-                halo = outer + self.pxf(3)
-                c.create_oval(px - halo, py - halo, px + halo, py + halo,
-                              outline=C_TEMP, width=self.pxf(1),
-                              dash=(2, 3), tags="endpoint")
-
-    def _draw_points(self) -> None:
-        c = self.canvas
-        for idx, pt in enumerate(self.points):
-            px, py = self._s(self.cmap.proj.xy(*pt))
-            color = C_A if idx == 0 else C_B
-            label = "A" if idx == 0 else "B"
-            outer = self.pxf(8.5)
-            inner = self.pxf(6.5)
-            c.create_oval(px - outer, py - outer, px + outer, py + outer,
-                          fill="#ffffff", outline="", tags="endpoint")
-            c.create_oval(px - inner, py - inner, px + inner, py + inner,
-                          fill=color, outline="#ffffff", width=self.pxf(1.5),
-                          tags="endpoint")
-            self._text_bg(px + self.px(12), py - self.px(13), label,
-                          fg=color, bg="#ffffff",
-                          font=(FONT_UI, 11, "bold"), pad=(3, 0),
-                          tags="endpoint")
+            self._number_marker(
+                p, idx + 1,
+                filled=idx < run.completed,
+                halo=(idx == last and not run.finished),
+            )
 
     def _draw_pace_marker(self) -> None:
         c = self.canvas

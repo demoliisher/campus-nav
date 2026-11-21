@@ -12,8 +12,9 @@ class ValueSlider(tk.Canvas):
     """Horizontal integer slider with a rheostat look.
 
     The track is a rounded line with the selected part filled in theme purple
-    and a circular knob. Dragging, clicking the track, the mouse wheel, and
-    the left/right arrow keys all adjust the value.
+    and a circular knob. Dragging, clicking the track, and the left/right
+    arrow keys adjust the value. The mouse wheel is deliberately ignored: the
+    wheel scrolls the sidebar, and passing over a slider must not change it.
     """
 
     def __init__(self, master, *, min_value: int, max_value: int, value: int,
@@ -33,9 +34,6 @@ class ValueSlider(tk.Canvas):
         self.bind("<Button-1>", self._on_press)
         self.bind("<B1-Motion>", self._on_drag)
         self.bind("<ButtonRelease-1>", self._on_release)
-        self.bind("<MouseWheel>", self._on_wheel)
-        self.bind("<Button-4>", lambda _e: self._step(-1))
-        self.bind("<Button-5>", lambda _e: self._step(1))
         self.bind("<Left>", lambda _e: self._step(-1))
         self.bind("<Right>", lambda _e: self._step(1))
         self.bind("<Home>", lambda _e: self.set_value(self.min_value))
@@ -127,12 +125,6 @@ class ValueSlider(tk.Canvas):
 
     def _on_release(self, _event) -> None:
         self._dragging = False
-
-    def _on_wheel(self, event) -> None:
-        if not event.delta:
-            return
-        step = 5 if abs(event.delta) >= 120 else 1
-        self._step(step if event.delta > 0 else -step)
 
     def _step(self, delta: int) -> None:
         self.set_value(self._value + delta)

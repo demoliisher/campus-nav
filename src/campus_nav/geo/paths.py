@@ -37,6 +37,37 @@ def append_path(dst: list[tuple[float, float]], src: list[tuple[float, float]]) 
         dst.extend(src)
 
 
+def sample_polyline(points: list[tuple[float, float]], interval_m: float,
+                    max_samples: int = 600) -> list[tuple[tuple[float, float],
+                                                              tuple[float, float]]]:
+    """Sample positions and unit tangents every ``interval_m`` along a polyline.
+
+    The first sample sits one interval from the start, so the direction arrow
+    placement is regular rather than crowded at the first vertex. Tangents
+    point in the direction of travel.
+    """
+    if interval_m <= 0.0 or len(points) < 2:
+        return []
+    out: list[tuple[tuple[float, float], tuple[float, float]]] = []
+    acc = 0.0
+    next_at = float(interval_m)
+    for a, b in zip(points, points[1:]):
+        seg = math.dist(a, b)
+        if seg <= 1e-12:
+            continue
+        ux = (b[0] - a[0]) / seg
+        uy = (b[1] - a[1]) / seg
+        while next_at <= acc + seg + 1e-9 and len(out) < max_samples:
+            t = (next_at - acc) / seg
+            out.append((
+                (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t),
+                (ux, uy),
+            ))
+            next_at += interval_m
+        acc += seg
+    return out
+
+
 def truncate_path(points: list[tuple[float, float]],
                    max_dist: float) -> list[tuple[float, float]]:
     """Return the prefix of a polyline up to max_dist."""

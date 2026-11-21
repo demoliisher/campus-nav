@@ -270,13 +270,17 @@ class CampusMap:
         return best
 
     def shortest_route(self, axy: tuple[float, float], bxy: tuple[float, float],
-                       avoid_dirs=None) -> RouteResult | None:
+                       avoid_dirs=None, snap_radius: float = 0.0) -> RouteResult | None:
         """A, B -> nearest-road feet C, D -> temporary connectors -> shortest C to D route.
 
         ``avoid_dirs`` is a set of directed edges whose reverse must be avoided
         (reduce-backtracking passes only the last edge of the previous leg to
         avoid an immediate reversal at a checkpoint); if no route remains, the
         exclusion is dropped.
+
+        ``snap_radius`` suppresses a connector when the point lies within that
+        distance of its nearest road: the route then starts directly at the
+        projected foot, so the short off-road hop is neither drawn nor counted.
         """
         pa = self.nearest_projection(*axy)
         pb = self.nearest_projection(*bxy)
@@ -405,8 +409,10 @@ class CampusMap:
             elif eid in self.crossing_eids:
                 areas_used.add(self.edge_area[eid])
 
-        ac_m = pa.dist
-        bd_m = pb.dist
+        snap_a = snap_radius > 0.0 and pa.dist <= snap_radius + 1e-9
+        snap_b = snap_radius > 0.0 and pb.dist <= snap_radius + 1e-9
+        ac_m = 0.0 if snap_a else pa.dist
+        bd_m = 0.0 if snap_b else pb.dist
         return RouteResult(
             a_xy=axy,
             b_xy=bxy,
@@ -425,6 +431,8 @@ class CampusMap:
             used_dirs=used_dirs,
             last_dir=last_dir,
             avoid_fallback=avoid_fallback,
+            snap_a=snap_a,
+            snap_b=snap_b,
         )
 
     # ---- Simulated scoring run -------------------------------------------
@@ -560,7 +568,8 @@ class CampusMap:
     def plan_point_run(self, n: int = 5, min_sep_m: float = 40.0,
                        reduce_backtrack: bool = False, run_limit: bool = False,
                        daily_cap_m: float = 8000.0, rng=None,
-                       points=None) -> PointRun | None:
+                       points=None,
+                       snap_radius: float = 0.0) -> PointRun | None:
         """Generate or reuse n ordered road points and chain them 1 -> 2 -> ... -> n.
 
         With reduce_backtrack, only an immediate reversal at a checkpoint is
@@ -572,6 +581,9 @@ class CampusMap:
         With run_limit, after the five checkpoints the route heads to the track
         via the shortest path (hidden point 6) and continues counterclockwise
         until the total reaches daily_cap_m (8 km male / 5 km female).
+
+        ``snap_radius`` is passed to each leg: user points within that distance
+        of a road join it directly, with no temporary connector.
         """
         if points is None:
             rng = rng or random.Random()
@@ -604,7 +616,10 @@ class CampusMap:
             avoid = None
             if reduce_backtrack and i > 0 and prev_last is not None:
                 avoid = {prev_last}
-            leg = self.shortest_route(pts_xy[i], pts_xy[i + 1], avoid_dirs=avoid)
+            leg = self.shortest_route(
+                pts_xy[i], pts_xy[i + 1], avoid_dirs=avoid,
+                snap_radius=snap_radius,
+            )
             if leg is None:
                 return None
             legs.append(leg)

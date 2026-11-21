@@ -3,7 +3,12 @@
 
 import pytest
 
-from campus_nav.geo.paths import append_path, polyline_midpoint, truncate_path
+from campus_nav.geo.paths import (
+    append_path,
+    polyline_midpoint,
+    sample_polyline,
+    truncate_path,
+)
 from campus_nav.geo.polygons import point_in_polygon, segment_inside
 from campus_nav.geo.projection import LocalProjection
 
@@ -33,6 +38,21 @@ def test_truncate_path():
     out = truncate_path(pts, 5.0)
     assert out[-1] == pytest.approx((3.0, 2.0))
     assert truncate_path(pts, 2.0)[-1] == pytest.approx((2.0, 0.0))
+
+
+def test_sample_polyline_spacing_and_tangents():
+    samples = sample_polyline([(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], 30.0)
+    xs = [p[0][0] for p in samples]
+    ys = [p[0][1] for p in samples]
+    assert xs == pytest.approx([30.0, 60.0, 90.0, 100.0, 100.0, 100.0])
+    assert ys == pytest.approx([0.0, 0.0, 0.0, 20.0, 50.0, 80.0])
+    assert samples[0][1] == pytest.approx((1.0, 0.0))
+    assert samples[-1][1] == pytest.approx((0.0, 1.0))
+
+
+def test_sample_polyline_needs_a_positive_interval():
+    assert sample_polyline([(0.0, 0.0), (50.0, 0.0)], 0.0) == []
+    assert sample_polyline([(0.0, 0.0)], 10.0) == []
 
 
 def test_append_path_dedupes_joint():
