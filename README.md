@@ -54,10 +54,14 @@ The window has two modes.
   (8 km for male, 5 km for female, male by default).
 - **Stroll**: every road and ring is treated as a centerline with a uniform
   10 m width. The moving arrow keeps to the right side, may wander inside that
-  lane, and returns to the centerline near sharp turns and checkpoints. The
-  location interval (1-10 s) and maximum heading noise (0 to +/-5 degrees) are
-  adjustable. The full wander path is generated before playback starts, so the
-  arrow never pauses to search for the next target.
+  lane, and returns to the centerline at checkpoints. Corners are followed as
+  rounded arcs instead of stepping on the raw GeoJSON vertices, the lane is
+  pulled toward the inside of a turn so the trail never folds over itself, and
+  a checkpoint that requires doubling back is reached with a half-circle loop
+  rather than an acute angle. The location interval (1-10 s) and maximum
+  heading noise (0 to +/-5 degrees) are adjustable. The full wander path is
+  generated before playback starts, so the arrow never pauses to search for
+  the next target.
 
 ### Both modes
 
@@ -201,11 +205,16 @@ uv run python scripts/build_gcj02_data.py
    point: route to the track, then continue along the counterclockwise
    boundary for the remaining distance (multiple laps are allowed) and
    truncate the final path by length.
-7. Stroll playback samples the planned route as a centerline. Each location
-   update advances by `speed x interval` meters, applies a bounded random
-   heading, clamps the lateral offset to the right half of the 10 m road, and
-   pulls the path back to the centerline at corners and checkpoints. The
-   sequence is precomputed; the animation only interpolates it.
+7. Stroll playback treats the planned route as a centerline. Each leg between
+   U-turns is resampled and smoothed into a curve, so corners become short
+   arcs and the path never steps on the raw GeoJSON vertices. Each location
+   update still advances by `speed x interval` meters with a bounded random
+   heading; the offset stays in the right half of the 10 m road, is capped on
+   the inside of a turn in proportion to the local corner radius (which is
+   what keeps the trail from folding back on itself), and returns to the
+   centerline at checkpoints. Where the route doubles back, a half circle joins
+   the two lanes so the required turn-around is a loop instead of an acute
+   angle. The sequence is precomputed; the animation only interpolates it.
 8. Route-planning direction arrows are sampled every N meters along the
    planned polyline, taking the unit tangent of the segment they fall on. The
    sampler is independent of the graph, so arrow density can change without
@@ -221,5 +230,5 @@ uv run campus-nav --check
 
 `test_self_check_passes` in `uv run pytest` runs the same 52 checks as
 `--check`. The remaining tests cover pace parsing, datum conversion, fence
-alignment, stroll-path bounds, arrow sampling, snap radius, live-trail
-playback, geometry helpers, routing, and scoring-run behavior.
+alignment, stroll-path smoothness and bounds, arrow sampling, snap radius,
+live-trail playback, geometry helpers, routing, and scoring-run behavior.

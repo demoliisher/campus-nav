@@ -26,6 +26,20 @@ def _distance_to_route(point, route):
     return best
 
 
+def _worst_turn(points, min_seg=0.05):
+    """Sharpest direction change between consecutive segments, in degrees."""
+    worst = 0.0
+    for a, b, c in zip(points, points[1:], points[2:]):
+        l1 = math.dist(a, b)
+        l2 = math.dist(b, c)
+        if l1 < min_seg or l2 < min_seg:
+            continue
+        dot = ((b[0] - a[0]) * (c[0] - b[0])
+               + (b[1] - a[1]) * (c[1] - b[1])) / (l1 * l2)
+        worst = max(worst, math.degrees(math.acos(max(-1.0, min(1.0, dot)))))
+    return worst
+
+
 def test_stroll_starts_and_ends_on_route():
     route = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
     path = build_stroll_path(
@@ -101,3 +115,42 @@ def test_stroll_path_is_precomputed():
     # interpolates it and never asks for a new target.
     assert isinstance(path.points, tuple)
     assert len(path.points) > 2
+def test_corner_is_rounded_and_avoids_the_raw_vertex():
+    route = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)]
+    path = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+    )
+    points = list(path.points)
+    # No spike: the turn is spread over several samples.
+    assert _worst_turn(points) < 50.0
+    # The path does not step on the GeoJSON vertex itself.
+    assert min(math.dist(p, route[1]) for p in points) > 1.0
+
+
+def test_inside_corner_is_cut_instead_of_folding():
+    route = [(0.0, 0.0), (100.0, 0.0), (100.0, -100.0)]
+    path = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+    )
+    points = list(path.points)
+    assert _worst_turn(points) < 50.0
+    assert min(math.dist(p, route[1]) for p in points) > 1.0
+
+
+def test_u_turn_is_a_loop_not_an_acute_angle():
+    route = [(0.0, 0.0), (120.0, 0.0), (0.0, 0.0)]
+    anchor = (120.0, 0.0)
+    path = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+        anchors=[anchor],
+    )
+    points = list(path.points)
+    assert path.reversals == 1
+    assert _worst_turn(points) < 50.0
+    # The runner loops around the checkpoint: close, but not on a spike.
+    nearest = min(math.dist(p, anchor) for p in points)
+    assert 0.5 < nearest < HALF_ROAD_WIDTH_M
+    # Out and back stay on opposite sides, so the two lanes do not overlap.
+    assert any(p[1] < -1.0 for p in points)
+    assert any(p[1] > 1.0 for p in points)
+
