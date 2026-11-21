@@ -211,15 +211,17 @@ uv run python scripts/build_gcj02_data.py
    boundary for the remaining distance (multiple laps are allowed) and
    truncate the final path by length.
 7. Stroll playback treats the planned route as a centerline. Each leg between
-   U-turns is resampled and smoothed into a curve, so corners become short
-   arcs and the path never steps on the raw GeoJSON vertices. Each location
-   update still advances by `speed x interval` meters with a bounded random
-   heading; the offset stays in the right half of the 10 m road, is capped on
-   the inside of a turn in proportion to the local corner radius (which is
-   what keeps the trail from folding back on itself), and returns to the
-   centerline at checkpoints. Where the route doubles back, a half circle joins
-   the two lanes so the required turn-around is a loop instead of an acute
-   angle. The sequence is precomputed; the animation only interpolates it.
+   U-turns is resampled and smoothed into a curve, so corners become wide arcs
+   (about 6 m radius) and the path never steps on the raw GeoJSON vertices; the
+   ends of a leg are left untouched so a turn-around still meets the road
+   squarely. Each location update advances by `speed x interval` meters with a
+   bounded random heading; the offset stays in the right half of the 10 m road,
+   is capped on the inside of a turn in proportion to the local corner radius
+   (which keeps the trail from folding back on itself), and returns to the
+   centerline at checkpoints, whose positions are pinned back onto the curve
+   after smoothing. Where the route doubles back, a half circle joins the two
+   lanes so the required turn-around is a loop instead of an acute angle. The
+   sequence is precomputed; the animation only interpolates it.
 8. Route-planning direction arrows are sampled every N meters along the
    planned polyline, taking the unit tangent of the segment they fall on. The
    sampler is independent of the graph, so arrow density can change without

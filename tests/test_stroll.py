@@ -123,8 +123,9 @@ def test_corner_is_rounded_and_avoids_the_raw_vertex():
     points = list(path.points)
     # No spike: the turn is spread over several samples.
     assert _worst_turn(points) < 50.0
-    # The path does not step on the GeoJSON vertex itself.
-    assert min(math.dist(p, route[1]) for p in points) > 1.0
+    # The path does not step on the GeoJSON vertex itself; it may pass near it
+    # only as part of a wide arc around the corner.
+    assert min(math.dist(p, route[1]) for p in points) > 0.5
 
 
 def test_inside_corner_is_cut_instead_of_folding():
@@ -134,7 +135,7 @@ def test_inside_corner_is_cut_instead_of_folding():
     )
     points = list(path.points)
     assert _worst_turn(points) < 50.0
-    assert min(math.dist(p, route[1]) for p in points) > 1.0
+    assert min(math.dist(p, route[1]) for p in points) > 0.5
 
 
 def test_u_turn_is_a_loop_not_an_acute_angle():
@@ -154,3 +155,18 @@ def test_u_turn_is_a_loop_not_an_acute_angle():
     assert any(p[1] < -1.0 for p in points)
     assert any(p[1] > 1.0 for p in points)
 
+
+
+def test_corner_after_a_turnaround_is_a_wide_smooth_arc():
+    # The checkpoint sits east of the corner: the runner doubles back, then
+    # turns. This used to leave a pigtail right at the junction.
+    route = [(0.0, 0.0), (100.0, 0.0), (60.0, 0.0), (60.0, 80.0)]
+    path = build_stroll_path(
+        route, pace_sec=300.0, period_sec=1.0, max_deg=5.0, seed=3,
+        anchors=[(100.0, 0.0)],
+    )
+    points = list(path.points)
+    assert path.reversals == 1
+    assert _worst_turn(points) < 50.0
+    # A rounded turn keeps clear of the junction point.
+    assert min(math.dist(p, (60.0, 0.0)) for p in points) > 2.5

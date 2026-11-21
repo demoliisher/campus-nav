@@ -41,7 +41,7 @@ CAP_SMOOTH_WINDOW_M = 3.0                  # and blend its shoulders
 ANCHOR_ZONE_M = 4.0
 REVERSAL_ZONE_M = 6.0
 TANGENT_WINDOW_M = 0.8
-CENTER_SMOOTH_M = 3.0                      # corner rounding radius of the centerline
+CENTER_SMOOTH_M = 6.0                      # corner rounding radius of the centerline
 SAMPLE_M = 0.5
 SIMPLIFY_M = 0.08
 ARC_STEP_M = 0.4
@@ -68,6 +68,32 @@ def _dedupe(points) -> list[tuple[float, float]]:
     return out
 
 
+def _pin_points(points: list[tuple[float, float]], targets, half: int,
+                max_pull: float = 3.0) -> list[tuple[float, float]]:
+    """Bend a smoothed polyline so it passes through exact points.
+
+    Checkpoints sit on the raw road, which smoothing may have cut a couple of
+    meters inside the corner. A local smooth bump puts the curve back on the
+    checkpoint without reintroducing a sharp corner.
+    """
+    if not targets or half <= 0 or len(points) < 3:
+        return list(points)
+    out = list(points)
+    for tx, ty in targets:
+        i = min(range(len(out)),
+                key=lambda k: math.dist(out[k], (tx, ty)))
+        dx, dy = tx - out[i][0], ty - out[i][1]
+        pull = math.hypot(dx, dy)
+        if pull <= 1e-9 or pull > max_pull:
+            continue
+        lo = max(0, i - half)
+        hi = min(len(out), i + half + 1)
+        for j in range(lo, hi):
+            w = _smoothstep(1.0 - abs(j - i) / float(half))
+            out[j] = (out[j][0] + dx * w, out[j][1] + dy * w)
+    return out
+
+
 def _smoothstep(t: float) -> float:
     t = max(0.0, min(1.0, t))
     return t * t * (3.0 - 2.0 * t)
@@ -90,11 +116,13 @@ def _resample(points: list[tuple[float, float]],
 
 def _smooth(points: list[tuple[float, float]], half: int,
             passes: int = 2) -> list[tuple[float, float]]:
-    """Triangular moving average with fixed endpoints.
+    """Triangular moving average that leaves the two ends alone.
 
     This is what turns the raw GeoJSON polyline into a drivable curve: corners
     become arcs of roughly ``half`` samples radius, so an offset lane no longer
-    folds back on itself at every vertex.
+    folds back on itself at every vertex. The ends stay untouched so a leg
+    still meets a U-turn perpendicular to the road: the turn-around loop keeps
+    its shape instead of being pulled inward.
     """
     if half <= 0 or len(points) < 3:
         return list(points)
@@ -103,8 +131,13 @@ def _smooth(points: list[tuple[float, float]], half: int,
     for _ in range(max(1, passes)):
         out: list[tuple[float, float]] = []
         for i in range(n):
-            lo = max(0, i - half)
-            hi = min(n - 1, i + half)
+            edge = min(i, n - 1 - i)
+            if edge < half:
+                # Keep the approach/departure straight; blend out smoothly.
+                out.append(points[i] if edge == 0 else working[i])
+                continue
+            lo = i - half
+            hi = i + half
             sx = sy = 0.0
             weight = 0
             for j in range(lo, hi + 1):
@@ -113,8 +146,6 @@ def _smooth(points: list[tuple[float, float]], half: int,
                 sy += working[j][1] * w
                 weight += w
             out.append((sx / weight, sy / weight))
-        out[0] = points[0]
-        out[-1] = points[-1]
         working = out
     return working
 
@@ -421,6 +452,8 @@ def build_stroll_path(route_points, *, pace_sec: float, period_sec: float,
     joined: list[tuple[float, float]] = []
     for i, leg in enumerate(legs):
         joined.extend(leg if i == 0 else leg[1:])
+    joined = _pin_points(joined, [(float(p[0]), float(p[1])) for p in anchors],
+                         max(2, int(round(ANCHOR_ZONE_M / SAMPLE_M))))
     center = _Centerline(joined)
     reversals: list[float] = []
     acc = 0.0
