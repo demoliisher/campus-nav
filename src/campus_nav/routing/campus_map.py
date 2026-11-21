@@ -147,6 +147,19 @@ class CampusMap:
         self.road_eids = list(self.proj_eids)
         self.proj_total_m = sum(self.edges[eid].length for eid in self.proj_eids)
 
+        # Features marked with random_exclude are off limits for generated
+        # checkpoints (the roads leading to the campus gates).
+        self.random_excluded_features = {
+            fi for fi, feat in enumerate(self.features)
+            if (feat.get("properties") or {}).get("random_exclude")
+        }
+        self.random_eids = [eid for eid in self.proj_eids
+                            if self.edges[eid].feature_id
+                            not in self.random_excluded_features]
+        if not self.random_eids:
+            self.random_eids = list(self.proj_eids)
+        self.random_total_m = sum(self.edges[eid].length for eid in self.random_eids)
+
         xs = [p[0] for p in self.coords]
         ys = [p[1] for p in self.coords]
         self.bounds = (min(xs), min(ys), max(xs), max(ys))
@@ -437,13 +450,17 @@ class CampusMap:
 
     # ---- Simulated scoring run -------------------------------------------
     def random_road_point(self, rng=None) -> tuple[float, float]:
-        """Pick a length-uniform random point on a traversable road and return lon/lat."""
+        """Pick a length-uniform random point on a traversable road and return lon/lat.
+
+        Edges whose feature sets ``random_exclude`` are skipped, so generated
+        checkpoints never land on the roads leading to the campus gates.
+        """
         rng = rng or random
-        if self.proj_total_m <= 0.0:
+        if self.random_total_m <= 0.0:
             raise ValueError("Road network is empty; cannot sample a point")
-        r = rng.random() * self.proj_total_m
-        chosen = self.proj_eids[-1]
-        for eid in self.proj_eids:
+        r = rng.random() * self.random_total_m
+        chosen = self.random_eids[-1]
+        for eid in self.random_eids:
             e = self.edges[eid]
             if r <= e.length:
                 chosen = eid

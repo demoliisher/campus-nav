@@ -226,6 +226,29 @@ def run_check(cmap: CampusMap) -> bool:
           fmt_duration(300) == "5'00''" and fmt_duration(195) == "3'15''")
 
     # 8) Scoring run
+    incident: dict[int, list[int]] = {}
+    for eid, e in enumerate(cmap.edges):
+        incident.setdefault(e.u, []).append(eid)
+        incident.setdefault(e.v, []).append(eid)
+    gate_eids = [eids[0] for eids in incident.values() if len(eids) == 1]
+    gate_features = {cmap.edges[eid].feature_id for eid in gate_eids}
+    check("Roads to the campus gates are excluded from random checkpoints",
+          bool(gate_features)
+          and gate_features <= set(cmap.random_excluded_features),
+          ", ".join(cmap.edges[eid].desc for eid in gate_eids))
+
+    sampler = random.Random(20261120)
+    stray = 0
+    for _ in range(200):
+        p = cmap.random_road_point(sampler)
+        foot = cmap.nearest_projection(*cmap.proj.xy(*p))
+        edge = cmap.edges[foot.edge_id]
+        if (edge.feature_id in cmap.random_excluded_features
+                and 1e-9 < foot.t < 1.0 - 1e-9):
+            stray += 1
+    check("Random checkpoints never land on a gate road", stray == 0,
+          f"{stray}/200 stray samples")
+
     sample_run = cmap.plan_point_run(
         5, min_sep_m=40.0, rng=random.Random(20261120)
     )

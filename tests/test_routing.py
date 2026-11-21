@@ -107,3 +107,35 @@ def test_daily_cap(cmap):
     assert over.limit_state == "over"
     assert over.track_m == 0.0
     assert over.total_m == pytest.approx(base.total_m)
+
+
+def test_random_points_avoid_gate_roads(cmap):
+    excluded = cmap.random_excluded_features
+    assert excluded, "map data should mark the gate roads"
+
+    deg = [0] * len(cmap.coords)
+    for e in cmap.edges:
+        deg[e.u] += 1
+        deg[e.v] += 1
+    gate_features = {e.feature_id for e in cmap.edges
+                     if deg[e.u] == 1 or deg[e.v] == 1}
+    assert gate_features and gate_features <= excluded
+
+    rng = random.Random(20261121)
+    for _ in range(300):
+        point = cmap.random_road_point(rng)
+        proj = cmap.nearest_projection(*cmap.proj.xy(*point))
+        edge = cmap.edges[proj.edge_id]
+        # Only an exact shared node could resolve to a gate edge.
+        assert (edge.feature_id not in excluded
+                or not (1e-9 < proj.t < 1.0 - 1e-9))
+
+
+def test_generated_runs_avoid_gate_roads(cmap):
+    excluded = cmap.random_excluded_features
+    for seed in range(5):
+        run = cmap.plan_point_run(5, min_sep_m=40.0, rng=random.Random(seed))
+        assert run is not None
+        for xy in run.points_xy:
+            proj = cmap.nearest_projection(*xy)
+            assert cmap.edges[proj.edge_id].feature_id not in excluded
